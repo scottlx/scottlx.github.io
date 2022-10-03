@@ -21,7 +21,7 @@ disqusShortname = "yourdiscussshortname"  ## 是否开启disqus评论，不要�
   author = "windseek"
   subtitle = "专注于golang、云计算、SDN、NFV、软件架构"
   keywords = "golang,云计算,SDN,NFV,openvswitch,vpp,k8s,openstack"
-  description = "专注于IT互联网，包括但不限于Go语言(golang)、Java、Android、Python、项目管理、抖音分析、软件架构等"
+  description = "专注于IT互联网，包括但不限于Go语言(golang)、云计算、SDN、NFV、中间件、软件架构等"
   busuanzi = true #启用不算子网页统计
   googleAd = ""  #ca-pub-xxxxxxxxxxxxxx
   localSearch = true # 启用本地搜索
@@ -33,7 +33,7 @@ disqusShortname = "yourdiscussshortname"  ## 是否开启disqus评论，不要�
   # if ['custom.js'], load '/static/js/custom.js' file
 
   # 全局开关，你也可以在每一篇内容的 front matter 中针对单篇内容关闭或开启某些功能
-  toc = true  # 是否开启目录
+  toc = false  # 是否开启目录
 
 ## 友情链接，可以多个
 

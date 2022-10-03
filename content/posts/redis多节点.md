@@ -1,5 +1,5 @@
 ---
-title: "redis多节点"
+title: "redis 多节点"
 date: 2022-10-03T09:18:21+08:00
 draft: false
 tags: ["cache","redis","中间件"]
