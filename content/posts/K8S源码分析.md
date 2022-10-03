@@ -8,7 +8,6 @@ series: ["k8s系列"]
 series_weight: 96
 categories: ["技术介绍"]
 categoryes_weight: 96
-toc : true
 ---
 
 
