@@ -43,7 +43,7 @@ categoryes_weight: 96
 
 ### Pod Create
 
-![pod create](/img/k8s/pod create.svg)
+![pod create](/img/k8s/pod-create.svg)
 
 
 
