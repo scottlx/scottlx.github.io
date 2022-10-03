@@ -33,7 +33,7 @@ disqusShortname = "yourdiscussshortname"  ## 是否开启disqus评论，不要�
   # if ['custom.js'], load '/static/js/custom.js' file
 
   # 全局开关，你也可以在每一篇内容的 front matter 中针对单篇内容关闭或开启某些功能
-  toc = false  # 是否开启目录
+  toc = true  # 是否开启目录
 
 ## 友情链接，可以多个
 
