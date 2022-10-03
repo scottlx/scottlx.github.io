@@ -1,6 +1,6 @@
 ---
 title: "k8s源码分析"
-date: 2022-10-03T09:18:21+08:00
+date: 2022-10-03T16:00:00+08:00
 draft: false
 tags: ["kubernetes","源码分析","paas","云平台"]
 tags_weight: 66
