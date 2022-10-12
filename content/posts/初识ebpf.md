@@ -1,5 +1,5 @@
 ---
-title: "初始ebpf"
+title: "初识ebpf"
 date: 2022-10-03T14:00:00+08:00
 draft: false
 tags: ["ebpf","xdp","高性能网络"]
