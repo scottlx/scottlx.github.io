@@ -1,15 +1,18 @@
 baseURL = "https://scottlx.github.io"
+disablePathToLower = false
 languageCode = "zh-CN"
 title = "windseek的博客"
 theme = "Hugo-Octopress"
 
-## 保持分类的原始名字（false会做转小写处理）
-preserveTaxonomyNames = true
-## 是否禁止URL Path转小写
-disablePathToLower = true
-
-hasCJKLanguage = true
-summaryLength = 140
+# Disqus shortcode
+# Disable comments for any individual post by adding "comments: false" in its frontmatter
+# Note it's been moved from `.site.disqusShortname` to `.Site.Config.Services.Disqus.Shortname`
+# and will be deprecated in 0.135.0. See https://gohugo.io/content-management/comments/#configure-disqus.
+# [services]
+#  [services.disqus]
+#    shortname = "Your disqus shortname"
+# the theme still supports the old usage but Hugo will complain after 0.135.0.
+# disqusShortname = "Your disqus shortname"
 
 # Number of blog posts in each pagination page
 paginate = 6
@@ -17,59 +20,149 @@ paginate = 6
 [permalinks]
 post = "/blog/:year-:month-:day-:title/" # change the post URL to look like the old ones
 
-[author]
-  name = "windseek"
+[markup]
+  # Default is startLevel 2 and endLevel 3, we want to render every heading
+  [markup.tableOfContents]
+    endLevel = 8
+    startLevel = 1
+  # set the Chroma highlighting options
+  # https://gohugo.io/getting-started/configuration-markup/#highlight
+  [markup.highlight]
+    style = "solarized-dark"
+  # if you want to keep using Blackfriday
+  # defaultMarkdownHandler = "blackfriday"
+  #   [markup.blackFriday]
+  #     hrefTargetBlank = true # open links in a new tab
 
 [params]
+
+  # --- Start sidebar options ---
+  # Number of last posts that will be displayed in the sidebar - set to 0 or remove to hide this section
+  sidebarRecentLimit = 5
+
+  # Sidebar header - passed to markdownify so you can write markdown here
+  sidebarHeader = "Sidebar Header"
+
+  # Sidebar text also supports markdown
+  # New lines can be added with two spaces at the end of line. New paragraphs can be added with two an empty line.
+  # when adding two new lines, remember to remove the indentation otherwise the new line will be treated as a codeblock
+  sidebarText = """Here's a [link to google](https://www.google.com)
+
+  New paragraph
+
+  Another paragraph which has two spaces in the end to create a new line using markdown  
+  New line but not a new paragraph
+  """
+  # Sidebar menu - if true will add a sidebar menu between sidebar text and recent posts
+  sidebarMenuEnabled = true
+  sidebarMenuHeader = "Sidebar Links"
+
+  # sidebar links
+  github = "https://github.com/scottlx"
+  bitbucket = ""
+  twitter = ""
+  mastodon = ""
+  keybase = ""
+  stackoverflow = ""
+  linkedin = ""
+  youtube = ""
+  facebook = ""
+  instagram = ""
+
+  # --- End sidebar options ---
+
+  # If set to true, navigation menu links will open in a new window with the exception of links to root ("/")
+  # If this item does not exist or set to false, then navigation menu links will open in the same window
+  navigationNewWindow = true
+
+  # If false, all of blog post will appear on front page (and in pagination)
+  truncate = true
+
+  # Author's name (appears in meta tags and under posts)
   author = "windseek"
+
+  # This text appears in the site header under website title
   subtitle = "golang、云计算、SDN、NFV、软件架构"
-  keywords = "golang,云计算,SDN,NFV,openvswitch,vpp,k8s,openstack"
-  busuanzi = true #启用不算子网页统计
-  googleAd = ""  #ca-pub-xxxxxxxxxxxxxx
-  localSearch = true # 启用本地搜索
 
-  # 全局开关，你也可以在每一篇内容的 front matter 中针对单篇内容关闭或开启某些功能
-  toc = false  # 是否开启目录
+  # Search engine URL
+  searchEngineURL = "https://www.google.com/search"
 
-## 友情链接，可以多个
+  # Text of the "Continue Reading" label. Supports markdown and inline HTML.
+  # For example, &rarr; == right arrow.
+  continueReadingText = "Would you like to know more? &rarr;"
 
-[[params.links]]
-  title = "windseek的博客"
-  name = "windseek的博客"
-  url = "https://scottlx.github.io/"
+  # Optional piwik tracking
+  # [params.analytics.piwik]
+  #  URL = "https://stats.example.com"
+  #  ID = "42"
+
+  # Switch to true to enable RSS icon link
+  rss = false
+
+  # Set to true to use a text label for RSS instead of an icon
+  # This is overwritten by the "rss" setting
+  textrss = false
+
+  # Website's default description
+  description = ""
+
+  # Populate this with your own search keywords - these will appear in the meta tags
+  # defaultKeywords = ["keyword1" , "keyword2" , "keyword3" , "keyword4"]
+
+  # CSS override files
+  # Paths should be relative to the `static` directory
+  # customCSS = ["css/custom.css","css/custom2.css"]
+
+  # 404.html header and text - both support markdown
+  notFoundHeader = "There's nothing here"
+
+  notFoundText = """Please either go back or use the navigation/sidebar menus.
+  """
+
+  # Set to true to hide ReadingTime on posts
+  disableReadingTime = false
+
+  # Set to true to disable downloading of remote Google fonts
+  disableGoogleFonts = false
+
+  # Remove or Set to false to use local fonts
+  # remoteFonts = false
+  
+  # Remove or set to false to use FontAwesome CDN, otherwise the theme uses ForkAwesome local fonts.
+  # fontAwesome = false
+
+  # Generate taxonomy pages
+  generateTaxonomyList = true
+
+  # Sort the taxonomy alphabetically.
+  # sortTaxonomyAlphabetical = true
+
+  # Twitter card config
+  # Enable with this.
+  # twitterCardEnabled = true
+  # Don't include the @.
+  # twitterCardSite = 
+  # twitterCardDomain = "parsiya.net"
+  # Don't include the @.
+  # twitterCardAuthor = "CryptoGangsta"
+
+  # Set to true to enable compact index. Set to false or remove to go back to classic view.
+  # compactIndex = true
+
+  # Set mainSections.
+  # mainSections = ["post", "blog"]
+
+  # Site's custom favicon, this is a relative path to the `/static` directory
+  # favicon = "newfav.png"
+
+# Google analytics code - remove if you do not have/want Google
+# Analytics - needs JavaScript.
+# googleAnalytics = "G-MEASUREMENT_ID"
 
 
-## 侧边栏广告位
-
-## 配置 utteranc评论,教程参考 https://utteranc.es/
-[params.utteranc]
-  enable = true
-  repo = "scottlx/scottlx.github.io" ##换成自己得
-  issueTerm = "pathname"
-  label="💬"
-  theme="github-light"
-  crossorigin="anonymous"
-
-## 配置 waline 评论系统,教程参考 https://waline.js.org/
-[params.waline]
-  enable = false
-  placeholder = "说点什么吧..."
-  serverURL = "Your waline serverURL" #换成你的serverURL
-## 开启版权声明，协议名字和链接都可以换
-[params.cc]
-    name = "知识共享署名-非商业性使用-禁止演绎 4.0 国际许可协议"
-    link = "https://creativecommons.org/licenses/by-nc-nd/4.0/"
-
-## 配置代码高亮
-[markup]
-  [markup.highlight]
-    lineNos = true
-    style = "github"
-
-## 配置网站菜单
-
-[menu]
-
+# Menu
+# If navigationNewWindow (under [params]) is set to true then all links except root ("/") will open in a new window
+# If it does not exist or is set to false then links will open in the same window
   [[menu.main]]
     identifier = "tools"
     name = "工具"
@@ -82,15 +175,13 @@ post = "/blog/:year-:month-:day-:title/" # change the post URL to look like the 
     url = "/archives/"
     weight = 3
 
-  [[menu.main]]
-    identifier = "about"
-    name = "关于"
-    url = "/about/"
-    weight = 4
 
-## 配置分类
 
-[taxonomies]
-  tag = "tags"
-  series = "series"
-  category = "categories"
+# Sidebar menus
+# Enable with "sidebarMenuEnabled = true" under [params]
+# Header text is "sidebarMenuHeader" under [params]
+
+[[menu.sidebar]]
+  Name = "About me"
+  URL = "/about"
+  weight = 2
