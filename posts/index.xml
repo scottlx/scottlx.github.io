@@ -436,8 +436,8 @@ online时会原子读qsbr里的token，并设置到v-&amp;gt;qsbr_cnt[thread_id]
 &lt;h3 id="log-replication">log replication&lt;/h3>
 &lt;p>client的请求只会发往leader。leader收到改动后，将改动写入日志（还未持久化commit），并将改动通过heartbeat广播至follower节点。follower节点写了entry之后（此时还未commit），返回ack。leader收到大于集群节点一半的ack之后，认为已经可以commit了，广播commit的通知。最终集群内所有follower触发commit，向leader返回ack。最后leader认为集群已经达成一致性了，向client返回ack&lt;/p>
 &lt;p>如果集群中产生网络隔离，每个隔离域中会产生一个新的leader，整个集群会存在多个leader。follower少的leader由于获取不到majority ack，他的entry不会被commit。此时client往另一个follower多的leader发送数据改变请求，该隔离域的节点会被commit&lt;/p>
-&lt;p>此时去掉网络隔离后，之前follower少的隔离域内未commit的entry会被刷成之前follower多的隔离域的entry,随后commit，此时集群再次达成一致性&lt;/p></description></item><item><title>etcd client v3 连接流程</title><link>https://scottlx.github.io/posts/etcd-client-v3%E8%BF%9E%E6%8E%A5%E6%B5%81%E7%A8%8B/</link><pubDate>Fri, 28 Oct 2022 09:15:00 +0800</pubDate><guid>https://scottlx.github.io/posts/etcd-client-v3%E8%BF%9E%E6%8E%A5%E6%B5%81%E7%A8%8B/</guid><description>&lt;p>首先需要了解grpc框架的一些概念，这边引用网上的一张图&lt;/p>
-&lt;p>&lt;img src="https://upload-images.jianshu.io/upload_images/18509379-b2199d257be6b93e.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/953/format/webp" alt="img">&lt;/p>
+&lt;p>此时去掉网络隔离后，之前follower少的隔离域内未commit的entry会被刷成之前follower多的隔离域的entry,随后commit，此时集群再次达成一致性&lt;/p></description></item><item><title>etcd client v3 连接流程</title><link>https://scottlx.github.io/posts/etcd-client-v3%E8%BF%9E%E6%8E%A5%E6%B5%81%E7%A8%8B/</link><pubDate>Fri, 28 Oct 2022 09:15:00 +0800</pubDate><guid>https://scottlx.github.io/posts/etcd-client-v3%E8%BF%9E%E6%8E%A5%E6%B5%81%E7%A8%8B/</guid><description>&lt;p>首先需要了解grpc框架的一些概念，这边引用网上的一张图
+&lt;img src="https://scottlx.github.io/img/blobs/etcdclient.png" alt="Alt text">&lt;/p>
 &lt;h3 id="resolver">Resolver&lt;/h3>
 &lt;p>提供一个用户自定义的解析、修改地址的方法，使得用户可以自己去实现地址解析的逻辑、做服务发现、地址更新等等功能。&lt;/p>
 &lt;ol>
