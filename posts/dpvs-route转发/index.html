@@ -3,7 +3,7 @@
 <input type=hidden name=q value=site:https://scottlx.github.io/></fieldset></form></nav><div id=main><div id=content><div><article class=hentry role=article><header><p class=meta>Feb 18, 2025
 - 1 minute read
 - <a href=https://scottlx.github.io/posts/dpvs-route%E8%BD%AC%E5%8F%91/#disqus_thread>Comments</a>
-- <a class=label href=https://scottlx.github.io/categories/%e6%8a%80%e6%9c%af%e4%bb%8b%e7%bb%8d/>技术介绍</a></p><h1 class=entry-title>dpvs route转发</h1></header><div class=entry-content><h1 id=dpvs-route转发>dpvs route转发</h1><p>ipv4_rcv_fin 是路由转发逻辑， INET_HOOKPRE_ROUTING 中走完hook逻辑后，根据dpvs返回值走ipv4_rcv_fin</p><h2 id=路由表结构体>路由表结构体</h2><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#719e07>struct</span> route_entry {
+- <a class=label href=https://scottlx.github.io/categories/%e6%8a%80%e6%9c%af%e4%bb%8b%e7%bb%8d/>技术介绍</a></p><h1 class=entry-title>dpvs route转发</h1></header><div class=entry-content><p>ipv4_rcv_fin 是路由转发逻辑， INET_HOOKPRE_ROUTING 中走完hook逻辑后，根据dpvs返回值走ipv4_rcv_fin</p><h2 id=路由表结构体>路由表结构体</h2><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#719e07>struct</span> route_entry {
 </span></span><span style=display:flex><span>    <span style=color:#dc322f>uint8_t</span> netmask;
 </span></span><span style=display:flex><span>    <span style=color:#dc322f>short</span> metric;
 </span></span><span style=display:flex><span>    <span style=color:#dc322f>uint32_t</span> flag;

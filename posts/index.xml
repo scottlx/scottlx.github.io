@@ -1,5 +1,4 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Posts on windseek的博客</title><link>https://scottlx.github.io/posts/</link><description>Recent content in Posts on windseek的博客</description><generator>Hugo</generator><language>zh-CN</language><lastBuildDate>Tue, 18 Feb 2025 11:11:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/posts/index.xml" rel="self" type="application/rss+xml"/><item><title>dpvs icmp session</title><link>https://scottlx.github.io/posts/dpvs-icmp/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs-icmp/</guid><description>&lt;h1 id="dpvs-icmp-session">dpvs icmp session&lt;/h1>
-&lt;p>原生的ipvs仅处理三种类型的ICMP报文：ICMP_DEST_UNREACH、ICMP_SOURCE_QUENCH和ICMP_TIME_EXCEEDED&lt;/p>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Posts on windseek的博客</title><link>https://scottlx.github.io/posts/</link><description>Recent content in Posts on windseek的博客</description><generator>Hugo</generator><language>zh-CN</language><lastBuildDate>Tue, 18 Feb 2025 11:11:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/posts/index.xml" rel="self" type="application/rss+xml"/><item><title>dpvs icmp session</title><link>https://scottlx.github.io/posts/dpvs-icmp/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs-icmp/</guid><description>&lt;p>原生的ipvs仅处理三种类型的ICMP报文：ICMP_DEST_UNREACH、ICMP_SOURCE_QUENCH和ICMP_TIME_EXCEEDED&lt;/p>
 &lt;p>对于不是这三种类型的ICMP，则设置为不相关联(related)的ICMP，返回NF_ACCEPT，之后走本机路由流程&lt;/p>
 &lt;p>dpvs对ipvs进行了一些修改，修改后逻辑如下&lt;/p>
 &lt;h2 id="icmp差错报文流程">icmp差错报文流程&lt;/h2>
@@ -28,7 +27,7 @@
 &lt;p>​ 重新计算icmp头的checksum，走ipv4_output&lt;/p>
 &lt;/li>
 &lt;/ul>
-&lt;p>&lt;img src="https://i-blog.csdnimg.cn/blog_migrate/4687e28af632425a7d0f6d66487d954b.png#pic_center" alt="报文格式">&lt;/p>
+&lt;p>&lt;img src="https://scottlx.github.io/img/dpvs/icmp%E5%B7%AE%E9%94%99%E6%8A%A5%E6%96%87.png" alt="报文格式">&lt;/p>
 &lt;p>&lt;strong>实际应用上的问题&lt;/strong>&lt;/p>
 &lt;p>某个rs突然下线，导致有时访问vip轮询到了不可达的rs，rs侧的网关发送了一个dest_unreach的icmp包&lt;/p>
 &lt;p>该rs的conn还未老化，__dp_vs_in_icmp4流程根据这个icmp的内部差错ip头找到了还未老化的conn，将icmp数据区的port进行修改发回给client&lt;/p>
@@ -60,8 +59,9 @@
 &lt;p>&lt;strong>一次来回的ping会创建两个conn，且都只命中inboundhash。&lt;/strong>&lt;/p>
 &lt;h2 id="个人认为比较合理的方案">个人认为比较合理的方案&lt;/h2>
 &lt;h4 id="ipvsadm">ipvsadm&lt;/h4>
-&lt;p>放通port=0的svc的创建，用户需要fwd icmp to rs时，需要添加icmp类型的svc。否则icmp会被vip或者lip代答，不会透传到rs或client&lt;/p></description></item><item><title>dpvs route转发</title><link>https://scottlx.github.io/posts/dpvs-route%E8%BD%AC%E5%8F%91/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs-route%E8%BD%AC%E5%8F%91/</guid><description>&lt;h1 id="dpvs-route转发">dpvs route转发&lt;/h1>
-&lt;p>ipv4_rcv_fin 是路由转发逻辑， INET_HOOKPRE_ROUTING 中走完hook逻辑后，根据dpvs返回值走ipv4_rcv_fin&lt;/p>
+&lt;p>放通port=0的svc的创建，用户需要fwd icmp to rs时，需要添加icmp类型的svc。否则icmp会被vip或者lip代答，不会透传到rs或client&lt;/p>
+&lt;h4 id="icmp差错报文">icmp差错报文&lt;/h4>
+&lt;p>保持原状，对找不到关联的conn连接的差错报文进行drop。&lt;/p></description></item><item><title>dpvs route转发</title><link>https://scottlx.github.io/posts/dpvs-route%E8%BD%AC%E5%8F%91/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs-route%E8%BD%AC%E5%8F%91/</guid><description>&lt;p>ipv4_rcv_fin 是路由转发逻辑， INET_HOOKPRE_ROUTING 中走完hook逻辑后，根据dpvs返回值走ipv4_rcv_fin&lt;/p>
 &lt;h2 id="路由表结构体">路由表结构体&lt;/h2>
 &lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">struct&lt;/span> route_entry {
 &lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">uint8_t&lt;/span> netmask;
@@ -108,7 +108,7 @@ session接收和发送各占一个独立线程。&lt;/p>
 •	同步过来的session写到remote session表
 •	session ip根据fdir走到指定进程&lt;/p>
 &lt;h4 id="方案二无锁">方案二（无锁）：&lt;/h4>
-&lt;p>&lt;img src="https://scottlx.github.io/img/dpvs/ssession%E5%90%8C%E6%AD%A5%E6%97%A0%E9%94%81.png" alt="Alt text">
+&lt;p>&lt;img src="https://scottlx.github.io/img/dpvs/session%E5%90%8C%E6%AD%A5%E6%97%A0%E9%94%81.png" alt="Alt text">
 •	独立进程和core处理session同步消息
 •	每个lcore 有来local session和remote session，通过owner属性区分。
 •	同步过来的session由session_sync core发消息给对应的slave，由对应的slave进行读写，因此可以做到无锁。
@@ -137,7 +137,7 @@ session接收和发送各占一个独立线程。&lt;/p>
 &lt;p>owner属性：&lt;/p>
 &lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>conn.owner &lt;span style="color:#586e75">// indicates who has this session
 &lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>session 同步状态转移图&lt;/p>
-&lt;p>&lt;img src="https://scottlx.github.io/img/dpvs/ssession%E5%90%8C%E6%AD%A5%E7%8A%B6%E6%80%81%E8%BD%AC%E7%A7%BB.png" alt="Alt text">&lt;/p>
+&lt;p>&lt;img src="https://scottlx.github.io/img/dpvs/session%E5%90%8C%E6%AD%A5%E7%8A%B6%E6%80%81%E8%BD%AC%E7%A7%BB.png" alt="Alt text">&lt;/p>
 &lt;p>一条session在一个集群中，应当只有一台机器在使用，所以有一个owner属性，代表这条session被谁拥有，其它所有机器只对这条session的owner发起的增删改查请求做响应。&lt;/p>
 &lt;p>&lt;strong>同步动作&lt;/strong>
 session同步应当时实时的。在以下场景被触发：
@@ -162,8 +162,7 @@ fin/rst
 新设备：
 新上线设备引流前要接收其他设备的存量session信息，这个功能通过控制器触发完成，控制器感知到新lb上线后通知集群内其他lb向它同步存量session，session数量达到一致时（阿里gw用70%阈值）允许新lb引流。
 旧设备：
-向目的方发送全部的属于自己的session。&lt;/p></description></item><item><title>dpvs 数据流分析</title><link>https://scottlx.github.io/posts/dpvs%E6%95%B0%E6%8D%AE%E6%B5%81%E5%88%86%E6%9E%90/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs%E6%95%B0%E6%8D%AE%E6%B5%81%E5%88%86%E6%9E%90/</guid><description>&lt;h1 id="dpvs-数据流分析">dpvs 数据流分析&lt;/h1>
-&lt;h2 id="dpvs-ingress流程分析">dpvs ingress流程分析&lt;/h2>
+向目的方发送全部的属于自己的session。&lt;/p></description></item><item><title>dpvs 数据流分析</title><link>https://scottlx.github.io/posts/dpvs%E6%95%B0%E6%8D%AE%E6%B5%81%E5%88%86%E6%9E%90/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs%E6%95%B0%E6%8D%AE%E6%B5%81%E5%88%86%E6%9E%90/</guid><description>&lt;h2 id="dpvs-ingress流程分析">dpvs ingress流程分析&lt;/h2>
 &lt;p>从 &lt;em>lcore_job_recv_fwd&lt;/em> 开始，这个是dpvs收取报文的开始&lt;/p>
 &lt;h3 id="设备层">设备层&lt;/h3>
 &lt;p>dev-&amp;gt;flag &amp;amp; NETIF_PORT_FLAG_FORWARD2KNI &amp;mdash;&amp;gt; 则拷贝一份mbuf到kni队列中，这个由命令行和配置文件决定（做流量镜像，用于抓包）&lt;/p>
@@ -245,8 +244,7 @@ fin/rst
 &lt;p>非 ETH_PKT_HOST(broadcast 或者 multicast报文)或ip报文交给 &lt;em>ipv4_rcv_fin&lt;/em> 处理&lt;/p>
 &lt;/li>
 &lt;li>
-&lt;p>非 udp, tcp, icmp, icmp6报文交给 &lt;em>ipv4_rcv_fin&lt;/em> 处理&lt;/p></description></item><item><title>dpdk rcu lib</title><link>https://scottlx.github.io/posts/dpdk-rcu/</link><pubDate>Fri, 08 Dec 2023 17:48:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpdk-rcu/</guid><description>&lt;h1 id="dpdk-rcu">dpdk rcu&lt;/h1>
-&lt;p>linux的RCU主要针对的数据对象是链表，目的是提高遍历读取数据的效率，为了达到目的使用RCU机制读取数据的时候不对链表进行耗时的加锁操作。这样在同一时间可以有多个线程同时读取该链表，并且允许一个线程对链表进行修改。RCU适用于需要频繁的读取数据，而相应修改数据并不多的情景。&lt;/p>
+&lt;p>非 udp, tcp, icmp, icmp6报文交给 &lt;em>ipv4_rcv_fin&lt;/em> 处理&lt;/p></description></item><item><title>dpdk rcu lib</title><link>https://scottlx.github.io/posts/dpdk-rcu/</link><pubDate>Fri, 08 Dec 2023 17:48:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpdk-rcu/</guid><description>&lt;p>linux的RCU主要针对的数据对象是链表，目的是提高遍历读取数据的效率，为了达到目的使用RCU机制读取数据的时候不对链表进行耗时的加锁操作。这样在同一时间可以有多个线程同时读取该链表，并且允许一个线程对链表进行修改。RCU适用于需要频繁的读取数据，而相应修改数据并不多的情景。&lt;/p>
 &lt;p>dpdk中由于writer和reader同时访问一段内存，删除元素的时候需要确保&lt;/p>
 &lt;ol>
 &lt;li>删除时不会将内存put回allocator，而是删掉这段内存的引用。这样确保了新的访问者不会拿到这个元素的引用，而老的访问者不会在访问过程中core掉&lt;/li>
@@ -438,8 +436,7 @@ online时会原子读qsbr里的token，并设置到v-&amp;gt;qsbr_cnt[thread_id]
 &lt;h3 id="log-replication">log replication&lt;/h3>
 &lt;p>client的请求只会发往leader。leader收到改动后，将改动写入日志（还未持久化commit），并将改动通过heartbeat广播至follower节点。follower节点写了entry之后（此时还未commit），返回ack。leader收到大于集群节点一半的ack之后，认为已经可以commit了，广播commit的通知。最终集群内所有follower触发commit，向leader返回ack。最后leader认为集群已经达成一致性了，向client返回ack&lt;/p>
 &lt;p>如果集群中产生网络隔离，每个隔离域中会产生一个新的leader，整个集群会存在多个leader。follower少的leader由于获取不到majority ack，他的entry不会被commit。此时client往另一个follower多的leader发送数据改变请求，该隔离域的节点会被commit&lt;/p>
-&lt;p>此时去掉网络隔离后，之前follower少的隔离域内未commit的entry会被刷成之前follower多的隔离域的entry,随后commit，此时集群再次达成一致性&lt;/p></description></item><item><title>etcd client v3 连接流程</title><link>https://scottlx.github.io/posts/etcd-client-v3%E8%BF%9E%E6%8E%A5%E6%B5%81%E7%A8%8B/</link><pubDate>Fri, 28 Oct 2022 09:15:00 +0800</pubDate><guid>https://scottlx.github.io/posts/etcd-client-v3%E8%BF%9E%E6%8E%A5%E6%B5%81%E7%A8%8B/</guid><description>&lt;h1 id="etcd-client-v3-连接流程">etcd client v3 连接流程&lt;/h1>
-&lt;p>首先需要了解grpc框架的一些概念，这边引用网上的一张图&lt;/p>
+&lt;p>此时去掉网络隔离后，之前follower少的隔离域内未commit的entry会被刷成之前follower多的隔离域的entry,随后commit，此时集群再次达成一致性&lt;/p></description></item><item><title>etcd client v3 连接流程</title><link>https://scottlx.github.io/posts/etcd-client-v3%E8%BF%9E%E6%8E%A5%E6%B5%81%E7%A8%8B/</link><pubDate>Fri, 28 Oct 2022 09:15:00 +0800</pubDate><guid>https://scottlx.github.io/posts/etcd-client-v3%E8%BF%9E%E6%8E%A5%E6%B5%81%E7%A8%8B/</guid><description>&lt;p>首先需要了解grpc框架的一些概念，这边引用网上的一张图&lt;/p>
 &lt;p>&lt;img src="https://upload-images.jianshu.io/upload_images/18509379-b2199d257be6b93e.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/953/format/webp" alt="img">&lt;/p>
 &lt;h3 id="resolver">Resolver&lt;/h3>
 &lt;p>提供一个用户自定义的解析、修改地址的方法，使得用户可以自己去实现地址解析的逻辑、做服务发现、地址更新等等功能。&lt;/p>
