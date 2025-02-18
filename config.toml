@@ -23,8 +23,8 @@ post = "/blog/:year-:month-:day-:title/" # change the post URL to look like the 
 [markup]
   # Default is startLevel 2 and endLevel 3, we want to render every heading
   [markup.tableOfContents]
-    endLevel = 8
-    startLevel = 1
+    endLevel = 3
+    startLevel = 2
   # set the Chroma highlighting options
   # https://gohugo.io/getting-started/configuration-markup/#highlight
   [markup.highlight]

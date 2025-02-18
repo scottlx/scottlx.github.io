@@ -11,8 +11,6 @@ categoryes_weight: 96
 ---
 
 
-# dpvs route转发
-
 ipv4_rcv_fin 是路由转发逻辑， INET_HOOKPRE_ROUTING 中走完hook逻辑后，根据dpvs返回值走ipv4_rcv_fin 
 
 

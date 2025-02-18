@@ -34,7 +34,7 @@ local session：本节点收到数据包自己生成的session
 •	session ip根据fdir走到指定进程
 
 #### 方案二（无锁）： 
-![Alt text](/img/dpvs/ssession同步无锁.png)
+![Alt text](/img/dpvs/session同步无锁.png)
 •	独立进程和core处理session同步消息
 •	每个lcore 有来local session和remote session，通过owner属性区分。
 •	同步过来的session由session_sync core发消息给对应的slave，由对应的slave进行读写，因此可以做到无锁。
@@ -68,7 +68,7 @@ conn.owner // indicates who has this session
 
 session 同步状态转移图
 
-![Alt text](/img/dpvs/ssession同步状态转移.png)
+![Alt text](/img/dpvs/session同步状态转移.png)
 
 一条session在一个集群中，应当只有一台机器在使用，所以有一个owner属性，代表这条session被谁拥有，其它所有机器只对这条session的owner发起的增删改查请求做响应。
 
@@ -122,15 +122,15 @@ session syn ip（sip）作为一种资源统一有控制器管理和分配，当
 4. 控制器向集群存量设备通知新加入的session syn ip，并触发存量session同步。
    当lb下线时，触发SDN Controller下发lip更新事件，通知集群内每个lb更新现存session syn ip数据。
 
-![Alt text](/img/dpvs/ssession同步控制器.png)
+![Alt text](/img/dpvs/session同步控制器.png)
 
 ## fdir设计
 
 session同步报文采用underlay实现，因为不要求被同步者确认应答，所以用UDP协议实现较为合适。
-![Alt text](/img/dpvs/ssession同步报文格式.png)
+![Alt text](/img/dpvs/session同步报文格式.png)
 当lb1向lb2同步session时，src ip=sip1，dst ip=sip2，对应地，session同步报文的fdir规则就用sip作为匹配项，即lb2网卡收到目的地址为sip2的报文后fdir会直接将这个报文送到lb2的sessio同步接收队列上，由对应的核处理，从而实现与转发业务隔离。
 
-![Alt text](/img/dpvs/ssession同步fdir.png)
+![Alt text](/img/dpvs/session同步fdir.png)
 ### 同步报文设计
 
 #### 同步节奏&定时
@@ -146,7 +146,7 @@ session同步报文采用underlay实现，因为不要求被同步者确认应�
 eth和ip是实际目的地址,在这个地方，是sip。fdir规则需要提前定义，将sip导入指定worker中
 session_data: 采用tlv格式，具体如下图。采用小端数据格式。 
 
-![Alt text](/img/dpvs/ssession同步报文协议.png)
+![Alt text](/img/dpvs/session同步报文协议.png)
 3.	session同步max带宽估计 : 带宽使用最大的场景为设备上线，此时会有多台设备给同一台下，总共需要同步20M条session
 eth_hdr + ip_hdr + udp_hdr + FCS = 48 bytes 如果session同步时的af全都是ipv6，那么session_data的size为 80 bytes
 mtu = 1500： 一次最多同步18条session，总数据量为 20M / 18 * 1.5k=1.7G

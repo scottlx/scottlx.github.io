@@ -11,10 +11,6 @@ categoryes_weight: 96
 ---
 
 
-# dpvs icmp session
-
-
-
 原生的ipvs仅处理三种类型的ICMP报文：ICMP_DEST_UNREACH、ICMP_SOURCE_QUENCH和ICMP_TIME_EXCEEDED
 
 对于不是这三种类型的ICMP，则设置为不相关联(related)的ICMP，返回NF_ACCEPT，之后走本机路由流程
@@ -57,8 +53,7 @@ dpvs对ipvs进行了一些修改，修改后逻辑如下
   ​      重新计算icmp头的checksum，走ipv4_output
 
 
-
-![报文格式](https://i-blog.csdnimg.cn/blog_migrate/4687e28af632425a7d0f6d66487d954b.png#pic_center)
+![报文格式](/img/dpvs/icmp差错报文.png)
 
 **实际应用上的问题**
 

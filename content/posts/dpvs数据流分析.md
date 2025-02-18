@@ -11,7 +11,6 @@ categoryes_weight: 96
 ---
 
 
-# dpvs 数据流分析
 ## dpvs ingress流程分析
 
 从 *lcore_job_recv_fwd* 开始，这个是dpvs收取报文的开始
