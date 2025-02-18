@@ -211,7 +211,7 @@ kni_ioctl:
 ## kernel/linux/kni_net.c
 实际的kni_net设备,实现了报文的收发
 
-![kni_packets](https://img-blog.csdnimg.cn/img_convert/2a5b2a82408c3f7784a8693732b91510.png)
+![kni_packets](https://pic4.zhimg.com/v2-0b2066b331faa8907efad69e84e754b3_1440w.jpg)
 
 ### kni_net_init
 ```c
