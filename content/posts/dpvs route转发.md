@@ -1,6 +1,6 @@
 ---
 title: "dpvs route转发"
-date: 2025-2-18T11:11:00+08:00
+date: 2025-02-18T11:11:00+08:00
 draft: false
 tags: ["dpdk","dpvs","高性能网络"]
 tags_weight: 66
