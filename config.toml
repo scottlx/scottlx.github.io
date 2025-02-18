@@ -89,7 +89,7 @@ post = "/blog/:year-:month-:day-:title/" # change the post URL to look like the 
 
   # Text of the "Continue Reading" label. Supports markdown and inline HTML.
   # For example, &rarr; == right arrow.
-  continueReadingText = "Would you like to know more? &rarr;"
+  continueReadingText = "继续阅读 &rarr;"
 
   # Optional piwik tracking
   # [params.analytics.piwik]

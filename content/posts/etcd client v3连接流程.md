@@ -12,8 +12,7 @@ categoryes_weight: 96
 
 
 首先需要了解grpc框架的一些概念，这边引用网上的一张图
-
-![img](https://upload-images.jianshu.io/upload_images/18509379-b2199d257be6b93e.png?imageMogr2/auto-orient/strip|imageView2/2/w/953/format/webp)
+![Alt text](/img/blobs/etcdclient.png)
 
 ### Resolver
 
