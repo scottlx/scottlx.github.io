@@ -1,3 +1,3 @@
-[submodule "themes/maupassant"]
-	path = themes/maupassant
-	url = git@github.com:flysnow-org/maupassant-hugo.git
+[submodule "themes/Hugo-Octopress"]
+	path = themes/Hugo-Octopress
+	url = https://github.com/parsiya/Hugo-Octopress
