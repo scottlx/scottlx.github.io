@@ -1,1 +1,96 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>ebpf on windseek的博客</title><link>https://scottlx.github.io/tags/ebpf/</link><description>Recent content in ebpf on windseek的博客</description><generator>Hugo -- gohugo.io</generator><language>zh-CN</language><lastBuildDate>Mon, 03 Oct 2022 14:00:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/ebpf/index.xml" rel="self" type="application/rss+xml"/><item><title>gobpf不完整使用指南</title><link>https://scottlx.github.io/posts/gobpf/</link><pubDate>Mon, 03 Oct 2022 14:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/gobpf/</guid><description>编译过程 安装llvm-10,clang-10 apt-install llvm-10 clang-10 下载bpf2go 1 go install github.com/cilium/ebpf/cmd/bpf2go@latest 修改bpf程序的include 1 #include &amp;#34;common.h&amp;#34; 编译时将bpd的headers包含进来 1 GOPACKAGE=main bpf2go -cc clang-10 -cflags &amp;#39;-O2 -g -Wall -Werror&amp;#39; -target bpfel,bpfeb bpf helloworld.bpf.c -- -I /root/ebpf/examples/headers 得到大端和小端两个版本的ELF文件，之后在go程序里加载即可。cpu一般都是小端。 内核版本要求 经测</description></item><item><title>初识ebpf</title><link>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86ebpf/</link><pubDate>Mon, 03 Oct 2022 14:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86ebpf/</guid><description>摘自 eBPF 用户空间虚拟机实现相关 | Blog (forsworns.github.io) [译] Cilium：BPF 和 XDP 参考指南（2021） (arthurchiao.art) hook point 可以插入bpf代码的位置 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 enum bpf_prog_type { BPF_PROG_TYPE_UNSPEC, BPF_PROG_TYPE_SOCKET_FILTER, BPF_PROG_TYPE_KPROBE, BPF_PROG_TYPE_SCHED_CLS, BPF_PROG_TYPE_SCHED_ACT, BPF_PROG_TYPE_TRACEPOINT, BPF_PROG_TYPE_XDP, BPF_PROG_TYPE_PERF_EVENT, BPF_PROG_TYPE_CGROUP_SKB, BPF_PROG_TYPE_CGROUP_SOCK, BPF_PROG_TYPE_LWT_IN, BPF_PROG_TYPE_LWT_OUT, BPF_PROG_TYPE_LWT_XMIT, BPF_PROG_TYPE_SOCK_OPS, BPF_PROG_TYPE_SK_SKB, }; 程序类型 bpf_prog_type BPF prog 入口参数（R1) 程序类型 BPF_PROG_TYPE_SOCKET_FILTER struct __sk_buff 用于过滤进出口网络报文，功能上和 cBPF 类似。 BPF_PROG_TYPE_KPROBE struct pt_regs 用于</description></item></channel></rss>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Ebpf on windseek的博客</title><link>https://scottlx.github.io/tags/ebpf/</link><description>Recent content in Ebpf on windseek的博客</description><generator>Hugo</generator><language>zh-CN</language><lastBuildDate>Mon, 03 Oct 2022 14:00:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/ebpf/index.xml" rel="self" type="application/rss+xml"/><item><title>gobpf不完整使用指南</title><link>https://scottlx.github.io/posts/gobpf/</link><pubDate>Mon, 03 Oct 2022 14:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/gobpf/</guid><description>&lt;h3 id="编译过程">编译过程&lt;/h3>
+&lt;h4 id="安装llvm-10clang-10">安装llvm-10,clang-10&lt;/h4>
+&lt;p>apt-install llvm-10 clang-10&lt;/p>
+&lt;h4 id="下载bpf2go">下载bpf2go&lt;/h4>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-shell" data-lang="shell">&lt;span style="display:flex;">&lt;span>go install github.com/cilium/ebpf/cmd/bpf2go@latest
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>修改bpf程序的include&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#include&lt;/span> &lt;span style="color:#719e07">&amp;#34;common.h&amp;#34;&lt;/span>&lt;span style="color:#719e07">
+&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h4 id="编译时将bpd的headers包含进来">编译时将bpd的headers包含进来&lt;/h4>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-shell" data-lang="shell">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#268bd2">GOPACKAGE&lt;/span>&lt;span style="color:#719e07">=&lt;/span>main bpf2go -cc clang-10 -cflags &lt;span style="color:#2aa198">&amp;#39;-O2 -g -Wall -Werror&amp;#39;&lt;/span> -target bpfel,bpfeb bpf helloworld.bpf.c -- -I /root/ebpf/examples/headers
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>得到大端和小端两个版本的ELF文件，之后在go程序里加载即可。cpu一般都是小端。&lt;/p>
+&lt;h3 id="内核版本要求">内核版本要求&lt;/h3>
+&lt;p>经测试一些gobpf的一些syscall不适配较低版本的内核（例如5.8的BPF_LINK_CREATE会报参数错误），建议使用最新版本内核5.19&lt;/p>
+&lt;h3 id="bpf_map">bpf_map&lt;/h3>
+&lt;p>用户态程序首先加载bpf maps，再将bpf maps绑定到fd上。elf文件中的realocation table用来将代码中的bpf maps重定向至正确的fd上,用户程序在fd上发起bpf syscall&lt;/p>
+&lt;p>map的value尽量不要存复合数据结构，若bpf程序和用户态程序共用一个头文件，用户态程序调用bpf.Lookup时由于结构体变量unexported而反射失败&lt;/p>
+&lt;h3 id="pinning-object">pinning object&lt;/h3>
+&lt;p>将map挂载到/sys/fs/bpf&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-go" data-lang="go">&lt;span style="display:flex;">&lt;span>ebpf.CollectionOptions{
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> Maps: ebpf.MapOptions{
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// Pin the map to the BPF filesystem and configure the&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// library to automatically re-write it in the BPF&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// program so it can be re-used if it already exists or&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// create it if not&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> PinPath: pinPath
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>其他用户态程序获取pinned map的fd&lt;/p></description></item><item><title>初识ebpf</title><link>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86ebpf/</link><pubDate>Mon, 03 Oct 2022 14:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86ebpf/</guid><description>&lt;p>摘自&lt;/p>
+&lt;p>
+&lt;a href="https://forsworns.github.io/zh/blogs/20210329/" target="_blank" rel="noopener">eBPF 用户空间虚拟机实现相关 | Blog (forsworns.github.io)&lt;/a>&lt;/p>
+&lt;p>[
+&lt;a href="http://arthurchiao.art/blog/cilium-bpf-xdp-reference-guide-zh/" target="_blank" rel="noopener">译] Cilium：BPF 和 XDP 参考指南（2021） (arthurchiao.art)&lt;/a>&lt;/p>
+&lt;h3 id="hook-point">hook point&lt;/h3>
+&lt;p>可以插入bpf代码的位置&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">enum&lt;/span> bpf_prog_type {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_UNSPEC,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_SOCKET_FILTER,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_KPROBE,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_SCHED_CLS,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_SCHED_ACT,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_TRACEPOINT,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_XDP,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_PERF_EVENT,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_CGROUP_SKB,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_CGROUP_SOCK,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_LWT_IN,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_LWT_OUT,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_LWT_XMIT,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_SOCK_OPS,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_SK_SKB,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>};
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h3 id="程序类型">程序类型&lt;/h3>
+&lt;table>
+ &lt;thead>
+ &lt;tr>
+ &lt;th>&lt;strong>bpf_prog_type&lt;/strong>&lt;/th>
+ &lt;th>&lt;strong>BPF prog&lt;/strong> 入口参数（R1)&lt;/th>
+ &lt;th>&lt;strong>程序类型&lt;/strong>&lt;/th>
+ &lt;/tr>
+ &lt;/thead>
+ &lt;tbody>
+ &lt;tr>
+ &lt;td>&lt;strong>BPF_PROG_TYPE_SOCKET_FILTER&lt;/strong>&lt;/td>
+ &lt;td>&lt;strong>struct __sk_buff&lt;/strong>&lt;/td>
+ &lt;td>用于过滤进出口网络报文，功能上和 cBPF 类似。&lt;/td>
+ &lt;/tr>
+ &lt;tr>
+ &lt;td>&lt;strong>BPF_PROG_TYPE_KPROBE&lt;/strong>&lt;/td>
+ &lt;td>&lt;strong>struct&lt;/strong> &lt;strong>pt_regs&lt;/strong>&lt;/td>
+ &lt;td>用于 kprobe 功能的 BPF 代码。&lt;/td>
+ &lt;/tr>
+ &lt;tr>
+ &lt;td>&lt;strong>BPF_PROG_TYPE_TRACEPOINT&lt;/strong>&lt;/td>
+ &lt;td>这类 BPF 的参数比较特殊，根据 tracepoint 位置的不同而不同。&lt;/td>
+ &lt;td>用于在各个 tracepoint 节点运行。&lt;/td>
+ &lt;/tr>
+ &lt;tr>
+ &lt;td>&lt;strong>BPF_PROG_TYPE_XDP&lt;/strong>&lt;/td>
+ &lt;td>&lt;strong>struct&lt;/strong> &lt;strong>xdp_md&lt;/strong>&lt;/td>
+ &lt;td>用于控制 XDP(eXtreme Data Path)的 BPF 代码。&lt;/td>
+ &lt;/tr>
+ &lt;tr>
+ &lt;td>&lt;strong>BPF_PROG_TYPE_PERF_EVENT&lt;/strong>&lt;/td>
+ &lt;td>&lt;strong>struct bpf_perf_event_data&lt;/strong>&lt;/td>
+ &lt;td>用于定义 perf event 发生时回调的 BPF 代码。&lt;/td>
+ &lt;/tr>
+ &lt;tr>
+ &lt;td>&lt;strong>BPF_PROG_TYPE_CGROUP_SKB&lt;/strong>&lt;/td>
+ &lt;td>&lt;strong>struct __sk_buff&lt;/strong>&lt;/td>
+ &lt;td>用于在 network cgroup 中运行的 BPF 代码。功能上和 Socket_Filter 近似。具体用法可以参考范例 test_cgrp2_attach。&lt;/td>
+ &lt;/tr>
+ &lt;tr>
+ &lt;td>&lt;strong>BPF_PROG_TYPE_CGROUP_SOCK&lt;/strong>&lt;/td>
+ &lt;td>&lt;strong>struct bpf_sock&lt;/strong>&lt;/td>
+ &lt;td>另一个用于在 network cgroup 中运行的 BPF 代码，范例 test_cgrp2_sock2 中就展示了一个利用 BPF 来控制 host 和 netns 间通信的例子。&lt;/td>
+ &lt;/tr>
+ &lt;/tbody>
+&lt;/table>
+&lt;p>BPF 程序类型就是由 BPF side 的代码的函数参数确定的，比如写了一个函数，参数是 &lt;code>struct __sk_buff&lt;/code> 类型的，它就是一个 &lt;strong>BPF_PROG_TYPE_SOCKET_FILTER&lt;/strong> 类型的 BPF 程序&lt;/p></description></item></channel></rss>

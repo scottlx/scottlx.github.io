@@ -1,1 +1,194 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>cache on windseek的博客</title><link>https://scottlx.github.io/tags/cache/</link><description>Recent content in cache on windseek的博客</description><generator>Hugo -- gohugo.io</generator><language>zh-CN</language><lastBuildDate>Mon, 03 Oct 2022 15:00:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/cache/index.xml" rel="self" type="application/rss+xml"/><item><title>redis Server</title><link>https://scottlx.github.io/posts/redisServer/</link><pubDate>Mon, 03 Oct 2022 15:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/redisServer/</guid><description>数据库切换 默认会创建16个数据库，客户端通过select选取。但一般情况只用第0个数据库，切换容易导致误操作 1 2 3 4 5 6 7 8 9 typedef struct redisDb { dict *dict; //键空间 dict *expires; //过期字典 int id; } redisDb; 所有键空间存储在redisDb的dict中，称为key space 每个键是字符串对象，值是各种对象 读写键操作 更新key</description></item><item><title>redis 多节点</title><link>https://scottlx.github.io/posts/redis%E5%A4%9A%E8%8A%82%E7%82%B9/</link><pubDate>Mon, 03 Oct 2022 15:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/redis%E5%A4%9A%E8%8A%82%E7%82%B9/</guid><description>主从（复制） 同步 slave刚上线或断线重连时的第一次全量同步 slave的客户端主动发送sync命令，触发master的BGSAVE，BGSAVE过程中将命令存入缓冲区，BGSAVE完成后发送RDB文件，slave完成RDB载入后再发送缓冲区的指令 命令传播 完成同步后的增量同步 mas</description></item><item><title>redis 数据结构</title><link>https://scottlx.github.io/posts/redis%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84/</link><pubDate>Mon, 03 Oct 2022 15:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/redis%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84/</guid><description>此系列作为redis设计与实现的笔记，会将本人自认为重点部分单独拎出来，并加入本人的一些理解。 SDS （simple dynamic string） 等同于go里的slice 1 2 3 4 5 6 7 8 9 struct sdshdr { int len; int free; char buf[]; } 优点： 杜绝缓冲区溢出（free检验） 减少修改字符串时的内存分配次数（策略：小于1MB时，le</description></item></channel></rss>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Cache on windseek的博客</title><link>https://scottlx.github.io/tags/cache/</link><description>Recent content in Cache on windseek的博客</description><generator>Hugo</generator><language>zh-CN</language><lastBuildDate>Mon, 03 Oct 2022 15:00:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/cache/index.xml" rel="self" type="application/rss+xml"/><item><title>redis Server</title><link>https://scottlx.github.io/posts/redisserver/</link><pubDate>Mon, 03 Oct 2022 15:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/redisserver/</guid><description>&lt;h3 id="数据库切换">数据库切换&lt;/h3>
+&lt;p>默认会创建16个数据库，客户端通过select选取。但一般情况只用第0个数据库，切换容易导致误操作&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">typedef&lt;/span> &lt;span style="color:#719e07">struct&lt;/span> redisDb {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> dict &lt;span style="color:#719e07">*&lt;/span>dict; &lt;span style="color:#586e75">//键空间
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> dict &lt;span style="color:#719e07">*&lt;/span>expires; &lt;span style="color:#586e75">//过期字典
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">int&lt;/span> id;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>} redisDb;
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>所有键空间存储在redisDb的dict中，称为key space&lt;/p>
+&lt;p>每个键是字符串对象，值是各种对象&lt;/p>
+&lt;h3 id="读写键操作">读写键操作&lt;/h3>
+&lt;ol>
+&lt;li>更新keyspace_hits和keyspace_misses，用来输出统计数据&lt;/li>
+&lt;li>更新键的LRU时间&lt;/li>
+&lt;li>若发现该键已经过期，则删除键&lt;/li>
+&lt;li>若该键被watch，标记键为dirty，使得监听者发现后重新拉数据&lt;/li>
+&lt;li>dirty计数器++，用来触发持久化和复制操作&lt;/li>
+&lt;/ol>
+&lt;p>过期字典的键是键空间的键字符串对象的指针（不会新分配空间），值是longlong类型的过期时间（毫秒精度的unix时间戳）&lt;/p>
+&lt;p>判断是否过期：&lt;/p>
+&lt;p>先在过期字典里取key的过期时间，再与当前时间比较&lt;/p>
+&lt;h3 id="删除策略">删除策略&lt;/h3>
+&lt;p>（redis同时采用惰性删除和定期删除策略，其中定期删除是随机取出一定数量的键做检查）：&lt;/p>
+&lt;ul>
+&lt;li>定时删除：过期时立刻删除（问题：要创建大量定时器，占用太多CPU，因此不合理）&lt;/li>
+&lt;li>惰性删除：获取键时若过期才删除 （问题：内存最不友好）&lt;/li>
+&lt;li>定期删除：定期对所有key进行检查并删除 （问题：如何确定定期时间，太快或太慢都不好）&lt;/li>
+&lt;/ul>
+&lt;h3 id="持久化">持久化&lt;/h3>
+&lt;p>
+&lt;a href="https://www.cnblogs.com/justjavac/archive/2013/01/22/redis-persistence-demystified.html" target="_blank" rel="noopener">解密Redis持久化 - justjavac - 博客园 (cnblogs.com)&lt;/a>&lt;/p>
+&lt;h4 id="rdb">rdb&lt;/h4>
+&lt;p>记录键值&lt;/p>
+&lt;p>主服务器初始化加载时不会加载过期的键值，从服务器会加载过期的键值，但同步之后也会被清空掉&lt;/p>
+&lt;p>主节点统一管理过期删除，从节点只能被动接收del命令，保证了数据一致性，但从节点里可能会有过期键值&lt;/p>
+&lt;p>SAVE阻塞保存，BGSAVE用子进程保存&lt;/p>
+&lt;p>自动保存：自动保存规则设置在一个列表中，表示一段时间内进行了多少次改动就满足保存规则&lt;/p>
+&lt;p>每次写入会将db的dirty计数器加1，且每次保存会保存的时间戳lastsave。当距离lastsave的时间超过条件中设置的时间，比较dirty与规则中设置的改动次数，若满足则触发BGSAVE&lt;/p>
+&lt;p>RDB数据格式&lt;/p>
+&lt;table>
+ &lt;thead>
+ &lt;tr>
+ &lt;th>REDIS&lt;/th>
+ &lt;th>db_version&lt;/th>
+ &lt;th>database 0&lt;/th>
+ &lt;th>database 3&lt;/th>
+ &lt;th>EOF&lt;/th>
+ &lt;th>check_sum&lt;/th>
+ &lt;/tr>
+ &lt;/thead>
+ &lt;tbody>
+ &lt;tr>
+ &lt;td>&lt;/td>
+ &lt;td>&lt;/td>
+ &lt;td>&lt;/td>
+ &lt;td>&lt;/td>
+ &lt;td>&lt;/td>
+ &lt;td>&lt;/td>
+ &lt;/tr>
+ &lt;/tbody>
+&lt;/table>
+&lt;p>格式细节包括压缩算法略过&lt;/p>
+&lt;h4 id="aof">aof&lt;/h4>
+&lt;p>记录写命令（启动时优先选择加载aof）&lt;/p>
+&lt;p>命令追加：按redis协议追加到aof_buf缓冲区中&lt;/p>
+&lt;p>文件写入和同步：redis server主线程每次循环结束前，将缓冲区写入aof文件，并调用fsync落盘&lt;/p></description></item><item><title>redis 多节点</title><link>https://scottlx.github.io/posts/redis%E5%A4%9A%E8%8A%82%E7%82%B9/</link><pubDate>Mon, 03 Oct 2022 15:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/redis%E5%A4%9A%E8%8A%82%E7%82%B9/</guid><description>&lt;h1 id="主从复制">主从（复制）&lt;/h1>
+&lt;h2 id="同步">同步&lt;/h2>
+&lt;p>slave刚上线或断线重连时的第一次全量同步&lt;/p>
+&lt;p>slave的客户端主动发送sync命令，触发master的BGSAVE，BGSAVE过程中将命令存入缓冲区，BGSAVE完成后发送RDB文件，slave完成RDB载入后再发送缓冲区的指令&lt;/p>
+&lt;h2 id="命令传播">命令传播&lt;/h2>
+&lt;p>完成同步后的增量同步&lt;/p>
+&lt;p>master主动发送命令&lt;/p>
+&lt;h2 id="psync">psync&lt;/h2>
+&lt;p>优化后的sync，作为断线重连后的增量同步
+slave发送psync命令，master返回+continue，之后发送断开期间执行的写命令&lt;/p>
+&lt;h3 id="偏移量">偏移量&lt;/h3>
+&lt;p>主节点和从节点各自维护一个偏移量，表示当前已接收数据的字节数。当从节点发现自身偏移量与主节点不一致时，主动向主节点发送psync命令&lt;/p>
+&lt;h3 id="复制缓冲区">复制缓冲区&lt;/h3>
+&lt;p>主节点进行命令传播时(增量同步),会将写命令复制一份到缓冲区。且每个写命令都绑定一个对应的偏移量。从节点发送的psync中带有偏移量，
+通过该偏移量在复制缓冲区中查找偏移量之后的写命令。如果查不到，则执行完整同步(sync)&lt;/p>
+&lt;h3 id="服务器运行id">服务器运行ID&lt;/h3>
+&lt;p>从节点向主节点注册自己的分布式ID，新上线的从节点若不在注册表内，则进行完整同步(sync)，否则进行部分重同步。&lt;/p>
+&lt;h2 id="同步过程">同步过程&lt;/h2>
+&lt;p>slaveof命令设置redisServer中的masterhost和masterport字段，之后主从连接由cron定时器任务里触发&lt;/p>
+&lt;ul>
+&lt;li>anetTcpConnect建立一个新的tcp连接&lt;/li>
+&lt;li>ping-pong命令测试连接&lt;/li>
+&lt;li>auth鉴权&lt;/li>
+&lt;li>发送端口号，主节点刷新client信息&lt;/li>
+&lt;li>psyn/sync 同步&lt;/li>
+&lt;li>命令传播&lt;/li>
+&lt;li>心跳 发送REPLCONF ACK命令，其中带有从节点的偏移量，可以检测命令丢失（命令丢失后主节点和从节点的偏移量会不一样）；收到心跳的时间戳用来监测网络延迟状态，若一定数量的从服务器的lag超过一定值，表示该主从集合不健康，不允许client写入&lt;/li>
+&lt;/ul>
+&lt;h3 id="一致性">一致性&lt;/h3>
+&lt;p>不是强一致性（cap），是最终一致性。用最终一致性换取了高吞吐量&lt;/p>
+&lt;ul>
+&lt;li>master与slave的同步存在数据不一致的时间窗口期&lt;/li>
+&lt;li>网络分区后哨兵模式或者集群模式的选主会产生脑裂&lt;/li>
+&lt;/ul>
+&lt;h1 id="哨兵">哨兵&lt;/h1>
+&lt;p>多了一个哨兵节点进行主节点选举，触发从同步等工作，数据的同步还是主从模式
+哨兵节点运行的是一个特殊模式的redis服务器，里面没有数据库。&lt;/p>
+&lt;h3 id="连接类型">连接类型&lt;/h3>
+&lt;p>命令连接&lt;/p>
+&lt;p>订阅连接&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">/*实例不是 Sentinel （主服务器或者从服务器）
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">并且以下条件的其中一个成立：
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75"> 1）SENTINEL 未收到过这个服务器的 INFO 命令回复
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75"> 2）距离上一次该实例回复 INFO 命令已经超过 info_period 间隔
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75"> 那么向实例发送 INFO 命令
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">*/&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">if&lt;/span> ((ri&lt;span style="color:#719e07">-&amp;gt;&lt;/span>flags &lt;span style="color:#719e07">&amp;amp;&lt;/span> SRI_SENTINEL) &lt;span style="color:#719e07">==&lt;/span> &lt;span style="color:#2aa198">0&lt;/span> &lt;span style="color:#719e07">&amp;amp;&amp;amp;&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>​ (ri&lt;span style="color:#719e07">-&amp;gt;&lt;/span>info_refresh &lt;span style="color:#719e07">==&lt;/span> &lt;span style="color:#2aa198">0&lt;/span> &lt;span style="color:#719e07">||&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>​ (now &lt;span style="color:#719e07">-&lt;/span> ri&lt;span style="color:#719e07">-&amp;gt;&lt;/span>info_refresh) &lt;span style="color:#719e07">&amp;gt;&lt;/span> info_period))
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>​ &lt;span style="color:#586e75">/* Send INFO to masters and slaves, not sentinels. */&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>​ retval &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#268bd2">redisAsyncCommand&lt;/span>(ri&lt;span style="color:#719e07">-&amp;gt;&lt;/span>cc,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>​ sentinelInfoReplyCallback, &lt;span style="color:#b58900">NULL&lt;/span>, &lt;span style="color:#2aa198">&amp;#34;INFO&amp;#34;&lt;/span>);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>​ &lt;span style="color:#719e07">if&lt;/span> (retval &lt;span style="color:#719e07">==&lt;/span> REDIS_OK) ri&lt;span style="color:#719e07">-&amp;gt;&lt;/span>pending_commands&lt;span style="color:#719e07">++&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> } &lt;span style="color:#719e07">else&lt;/span> &lt;span style="color:#719e07">if&lt;/span> ((now &lt;span style="color:#719e07">-&lt;/span> ri&lt;span style="color:#719e07">-&amp;gt;&lt;/span>last_pong_time) &lt;span style="color:#719e07">&amp;gt;&lt;/span> ping_period) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>​ &lt;span style="color:#586e75">/* Send PING to all the three kinds of instances. */&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>​ &lt;span style="color:#268bd2">sentinelSendPing&lt;/span>(ri);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> } &lt;span style="color:#719e07">else&lt;/span> &lt;span style="color:#719e07">if&lt;/span> ((now &lt;span style="color:#719e07">-&lt;/span> ri&lt;span style="color:#719e07">-&amp;gt;&lt;/span>last_pub_time) &lt;span style="color:#719e07">&amp;gt;&lt;/span> SENTINEL_PUBLISH_PERIOD) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>​ &lt;span style="color:#586e75">/* PUBLISH hello messages to all the three kinds of instances. */&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>​ &lt;span style="color:#268bd2">sentinelSendHello&lt;/span>(ri);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h3 id="节点的连接">节点的连接&lt;/h3>
+&lt;p>哨兵主定时任务开始时，以1s或10s的间隔发送INFO命令，得到主节点的回复，并处理INFO回复的信息。回复中包含该主节点的从节点ip+port。处理函数中更新主节点的实例sentinelRedisInstance，并创建从节点，进行从节点的连接，获取从节点的详细信息。&lt;/p></description></item><item><title>redis 数据结构</title><link>https://scottlx.github.io/posts/redis%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84/</link><pubDate>Mon, 03 Oct 2022 15:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/redis%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84/</guid><description>&lt;p>此系列作为redis设计与实现的笔记，会将本人自认为重点部分单独拎出来，并加入本人的一些理解。&lt;/p>
+&lt;h3 id="sds">SDS&lt;/h3>
+&lt;p>（simple dynamic string）&lt;/p>
+&lt;p>等同于go里的slice&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">struct&lt;/span> sdshdr {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#dc322f">int&lt;/span> len;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#dc322f">int&lt;/span> free;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#dc322f">char&lt;/span> buf[];
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>优点：&lt;/p>
+&lt;ul>
+&lt;li>杜绝缓冲区溢出（free检验）&lt;/li>
+&lt;li>减少修改字符串时的内存分配次数（策略：小于1MB时，len=free，大于1MB时，free=1MB）&lt;/li>
+&lt;li>惰性空间释放（删除时实际空间并未缩减）&lt;/li>
+&lt;li>二进制安全（C字符串视/0为结束，不能用来存带/0的二进制数据）&lt;/li>
+&lt;li>部分兼容C字符串函数（默认在char数组最后加入/0，来兼容C字符串函数）&lt;/li>
+&lt;/ul>
+&lt;h3 id="链表">链表&lt;/h3>
+&lt;p>双向链表，无环，保存头指针和尾指针，保存链表长度字段，链表节点的数据为void*指针&lt;/p>
+&lt;h3 id="字典">字典&lt;/h3>
+&lt;p>字典有type，每个type实现了一系列操作kv的函数（对比，生成哈希，删除，复制等）&lt;/p>
+&lt;p>每个字典存有两个哈希表，一般用第一个ht[0]，第二个ht[1]用作rehash时的暂存容器&lt;/p>
+&lt;p>哈希表由数组实现，数组存放kv链表头节点，链地址法解决冲突，冲突的新键值往表头加（由于没有指向表尾的指针）&lt;/p>
+&lt;p>rehash标志位，当没有进行rehash时为-1&lt;/p>
+&lt;p>key&amp;ndash;&amp;gt;(hashfunc)&amp;ndash;&amp;gt;hash&amp;ndash;&amp;gt;(hashmask)&amp;ndash;&amp;gt;index&lt;/p>
+&lt;p>murmurhash算法：输入有规律情况还是能生成随机分布性的hash&lt;/p>
+&lt;h4 id="rehash">rehash&lt;/h4>
+&lt;p>为ht[1]哈希表分配空间，空间的大小取决于当前ht[0]包含的键值数量以及要进行的操作，重新计算所有键值在ht[1]的索引并插入，插入后将ht[1]设置为ht[0]，并ht[1]指向新创的空白hash表&lt;/p>
+&lt;p>负载因子=ht[0].used/ht[0].size&lt;/p>
+&lt;h5 id="何时进行扩展">何时进行扩展?&lt;/h5>
+&lt;p>在进行持久化操作时(BGSAVE,BGREWRITEAOF)，负载因子&amp;gt;=5，普通场景下负载因子&amp;gt;=1&lt;/p>
+&lt;h5 id="何时进行收缩">何时进行收缩?&lt;/h5>
+&lt;p>负载因子&amp;lt;0.1&lt;/p>
+&lt;h5 id="渐进式rehash">渐进式rehash&lt;/h5>
+&lt;p>开始时rehashidx为0，表示正在进行rehash，rehash期间对字典的CRUD会顺带将ht[0]上的KV rehash到ht[1]，完成后rehashidx置为-1,表示已经完成。rehash期间的CRUD会先在ht[0]上查，查不到再去ht[1]查&lt;/p>
+&lt;h3 id="跳表">跳表&lt;/h3>
+&lt;p>用来实现有序集合键，用作集群节点内部数据结构&lt;/p>
+&lt;p>优点，相较于平衡树，实现简单，且rebalance的效率高（局部rebalance，只修改搜索路径上的节点）&lt;/p>
+&lt;p>链表的扩展，维护了多个指向其他节点的指针，类似二分查找&lt;/p>
+&lt;p>每个节点的层数是随机生成的，遍历时先走最上层的前进指针，若下一条节点的分值比要查找的分值高，则通过回退指针回到原来的节点并走下一层的前进指针，以此类推&lt;/p>
+&lt;p>前进指针中存有跨度，累加所有跨度，当找到该节点后作为该节点在跳表中的排位（数组的index）&lt;/p>
+&lt;p>比较分值时，分值可能相同，相同时比较value值（obj指向的sds的字典序）&lt;/p>
+&lt;p>节点更新时，若score的改变未影响排序，则查找并直接改score，否则进行先删除后插入操作，会进行两次路径搜索&lt;/p>
+&lt;h3 id="整数集合">整数集合&lt;/h3>
+&lt;p>底层保存的整数为byte数组(int8)，按照解码类型(encoding)存入int16，int32或int64的数据&lt;/p>
+&lt;p>只能存一种类型的数据，短int集合中插入长int后，往长int类型兼容（升级）&lt;/p>
+&lt;p>节约内存，int16不需要分配int64的空间&lt;/p>
+&lt;p>自适应灵活性，集合中添加长度更长的新元素，会自动升级，但不支持降级&lt;/p>
+&lt;h3 id="压缩列表">压缩列表&lt;/h3>
+&lt;p>为了节约内存，将键值为小整数值和短字符串的entry按照特殊编排压缩为一段内存块&lt;/p>
+&lt;p>先略过&lt;/p>
+&lt;h3 id="对象">对象&lt;/h3>
+&lt;p>创建键值对时，键和值都被封装成对象，并指明对象的类型，编码以及底层数据结构的指针&lt;/p>
+&lt;p>key总是字符串对象，value可以是字符串对象，列表对象，哈希对象，集合对象，有序集合对象(zset)&lt;/p>
+&lt;p>编码指定了底层数据结构, 每种对象类型有多种编码的实现&lt;/p>
+&lt;h4 id="字符串对象">字符串对象&lt;/h4>
+&lt;p>long：value是数字，可以用long存&lt;/p>
+&lt;p>raw：value是字符串，长度大于32byte，用sds存，sds的内存是另外一块，和redisObject不连续&lt;/p>
+&lt;p>embstr：value是字符串，长度小于32byte，用sds存，sds的内存与redisObject的内存连续 （好处：减少分配和释放内存的次数，增加缓存命中率；坏处：没有实现写方法，只读，修改的话需要先转raw）&lt;/p></description></item></channel></rss>

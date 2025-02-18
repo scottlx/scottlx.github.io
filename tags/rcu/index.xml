@@ -1,1 +1,41 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>rcu on windseek的博客</title><link>https://scottlx.github.io/tags/rcu/</link><description>Recent content in rcu on windseek的博客</description><generator>Hugo -- gohugo.io</generator><language>zh-CN</language><lastBuildDate>Fri, 08 Dec 2023 17:48:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/rcu/index.xml" rel="self" type="application/rss+xml"/><item><title>dpdk rcu lib</title><link>https://scottlx.github.io/posts/dpdk-rcu/</link><pubDate>Fri, 08 Dec 2023 17:48:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpdk-rcu/</guid><description>dpdk rcu linux的RCU主要针对的数据对象是链表，目的是提高遍历读取数据的效率，为了达到目的使用RCU机制读取数据的时候不对链表进行耗时的加锁操作。这样在同一时间可以有多个线程同时读取该链表，并且允许一个线程对链表进行修改。RCU适用于需要频繁的读取数据，而相应修改数据并不多的情景</description></item></channel></rss>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Rcu on windseek的博客</title><link>https://scottlx.github.io/tags/rcu/</link><description>Recent content in Rcu on windseek的博客</description><generator>Hugo</generator><language>zh-CN</language><lastBuildDate>Fri, 08 Dec 2023 17:48:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/rcu/index.xml" rel="self" type="application/rss+xml"/><item><title>dpdk rcu lib</title><link>https://scottlx.github.io/posts/dpdk-rcu/</link><pubDate>Fri, 08 Dec 2023 17:48:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpdk-rcu/</guid><description>&lt;h1 id="dpdk-rcu">dpdk rcu&lt;/h1>
+&lt;p>linux的RCU主要针对的数据对象是链表，目的是提高遍历读取数据的效率，为了达到目的使用RCU机制读取数据的时候不对链表进行耗时的加锁操作。这样在同一时间可以有多个线程同时读取该链表，并且允许一个线程对链表进行修改。RCU适用于需要频繁的读取数据，而相应修改数据并不多的情景。&lt;/p>
+&lt;p>dpdk中由于writer和reader同时访问一段内存，删除元素的时候需要确保&lt;/p>
+&lt;ol>
+&lt;li>删除时不会将内存put回allocator，而是删掉这段内存的引用。这样确保了新的访问者不会拿到这个元素的引用，而老的访问者不会在访问过程中core掉&lt;/li>
+&lt;li>只有在元素没有任何引用计数时，才释放掉该元素的内存&lt;/li>
+&lt;/ol>
+&lt;p>静默期是指线程没有持有共享内存的引用的时期，也就是下图绿色的时期&lt;/p>
+&lt;p>&lt;img src="https://doc.dpdk.org/guides/_images/rcu_general_info.svg" alt="rcu">&lt;/p>
+&lt;p>上图中，有三个read thread，T1， T2，T3。两条黑色竖线分别代表writer执行delete和free的时刻。&lt;/p>
+&lt;p>执行delete时，T1和T2还拿着entry1和entry2的reference，此时writer还不能free entry1或entry2的内存，只能删除元素的引用.&lt;/p>
+&lt;p>writer&lt;em>&lt;strong>必须等到执行delete时，当时引用该元素的的线程，都完成了一个静默期之后&lt;/strong>&lt;/em>，才可以free这个内存。&lt;/p>
+&lt;p>writer不需要等T3进入静默期，因为执行delete时，T3还在静默期。&lt;/p>
+&lt;p>如何实现RCU机制&lt;/p>
+&lt;ol>
+&lt;li>writer需要一直轮询reader的状态，看是否进入静默期。这样会导致一直循环轮询，造成额外的cpu消耗。由于需要等reader的静默期结束，reader的静默期越长，reader的数量越多，writer cpu的消耗会越大，因此我们需要短的grace period。但是如果将reader的critical section减小，虽然writer的轮询变快了，但是reader的报告次数增加，reader的cpu消耗会增加，因此我们需要长的critical section。这两者之间看似矛盾。&lt;/li>
+&lt;li>长的critical section：dpdk的lcore一般都是一个while循环。循环的开始和结束必定是静默期。循环的过程中肯定是在访问各种各样的共享内存。因此critical section的粒度可以不要很细，不要每次访问的时候退出静默期，不访问的时候进入静默期，而是将整个循环认为是critical section，只有在循环的开始退出静默期，循环的结束进入静默期。&lt;/li>
+&lt;li>短的grace period：如果是pipeline模型，并不是所有worker都会使用相同的数据结构。话句话说，同一个元素，只会被部分的worker所引用和读取。因此writer不需要等到所有worker的critical section结束，而是使用该元素的worker结束critical section。这样将grace period粒度变小之后，缩短了writer整体的grace period。这种粒度的控制是通过 qsbr 实现的&lt;/li>
+&lt;/ol>
+&lt;h2 id="如何使用rcu库">如何使用rcu库&lt;/h2>
+&lt;p>dpdk-stable-20.11.1/app/test/test_rcu_qsbr.c test_rcu_qsbr_sw_sv_3qs&lt;/p>
+&lt;p>先创建出struct rte_rcu_qsbr&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span> sz &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#268bd2">rte_rcu_qsbr_get_memsize&lt;/span>(RTE_MAX_LCORE);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> rv &lt;span style="color:#719e07">=&lt;/span> (&lt;span style="color:#719e07">struct&lt;/span> rte_rcu_qsbr &lt;span style="color:#719e07">*&lt;/span>)&lt;span style="color:#268bd2">rte_zmalloc&lt;/span>(&lt;span style="color:#b58900">NULL&lt;/span>, sz, RTE_CACHE_LINE_SIZE);
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>再初始化QS variable&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span> &lt;span style="color:#268bd2">rte_rcu_qsbr_init&lt;/span>(rv, RTE_MAX_LCORE);
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>Reader注册自己的线程号，并上线（将自己加到writer的轮询队列里面）
+online时会原子读qsbr里的token，并设置到v-&amp;gt;qsbr_cnt[thread_id].cnt中&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>(&lt;span style="color:#dc322f">void&lt;/span>)&lt;span style="color:#268bd2">rte_rcu_qsbr_thread_register&lt;/span>(rv, lcore_id);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#268bd2">rte_rcu_qsbr_thread_online&lt;/span>(rv, lcore_id);
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>每次读取共享数据后，更新自己的静默状态（rte_rcu_qsbr_quiescent）&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">do&lt;/span> {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">for&lt;/span> (i &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#2aa198">0&lt;/span>; i &lt;span style="color:#719e07">&amp;lt;&lt;/span> num_keys; i &lt;span style="color:#719e07">+=&lt;/span> j) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">for&lt;/span> (j &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#2aa198">0&lt;/span>; j &lt;span style="color:#719e07">&amp;lt;&lt;/span> QSBR_REPORTING_INTERVAL; j&lt;span style="color:#719e07">++&lt;/span>)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#268bd2">rte_hash_lookup&lt;/span>(tbl_rwc_test_param.h,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> keys &lt;span style="color:#719e07">+&lt;/span> i &lt;span style="color:#719e07">+&lt;/span> j);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">/* Update quiescent state counter */&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#268bd2">rte_rcu_qsbr_quiescent&lt;/span>(rv, lcore_id);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> } &lt;span style="color:#719e07">while&lt;/span> (&lt;span style="color:#719e07">!&lt;/span>writer_done);
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>rte_rcu_qsbr_quiescent 是将qsbr-&amp;gt;token更新到自己thread的token里去v-&amp;gt;qsbr_cnt[thread_id].cnt&lt;/p></description></item></channel></rss>

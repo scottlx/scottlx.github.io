@@ -1,1 +1,56 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>grpc on windseek的博客</title><link>https://scottlx.github.io/tags/grpc/</link><description>Recent content in grpc on windseek的博客</description><generator>Hugo -- gohugo.io</generator><language>zh-CN</language><lastBuildDate>Fri, 28 Oct 2022 09:15:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/grpc/index.xml" rel="self" type="application/rss+xml"/><item><title>etcd client v3 连接流程</title><link>https://scottlx.github.io/posts/etcd-client-v3%E8%BF%9E%E6%8E%A5%E6%B5%81%E7%A8%8B/</link><pubDate>Fri, 28 Oct 2022 09:15:00 +0800</pubDate><guid>https://scottlx.github.io/posts/etcd-client-v3%E8%BF%9E%E6%8E%A5%E6%B5%81%E7%A8%8B/</guid><description>etcd client v3 连接流程 首先需要了解grpc框架的一些概念，这边引用网上的一张图 Resolver 提供一个用户自定义的解析、修改地址的方法，使得用户可以自己去实现地址解析的逻辑、做服务发现、地址更新等等功能。 将Endpoints里的ETCD服务器地址(127.0.0.1:2379这种格式)做一次转换传给g</description></item></channel></rss>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Grpc on windseek的博客</title><link>https://scottlx.github.io/tags/grpc/</link><description>Recent content in Grpc on windseek的博客</description><generator>Hugo</generator><language>zh-CN</language><lastBuildDate>Fri, 28 Oct 2022 09:15:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/grpc/index.xml" rel="self" type="application/rss+xml"/><item><title>etcd client v3 连接流程</title><link>https://scottlx.github.io/posts/etcd-client-v3%E8%BF%9E%E6%8E%A5%E6%B5%81%E7%A8%8B/</link><pubDate>Fri, 28 Oct 2022 09:15:00 +0800</pubDate><guid>https://scottlx.github.io/posts/etcd-client-v3%E8%BF%9E%E6%8E%A5%E6%B5%81%E7%A8%8B/</guid><description>&lt;h1 id="etcd-client-v3-连接流程">etcd client v3 连接流程&lt;/h1>
+&lt;p>首先需要了解grpc框架的一些概念，这边引用网上的一张图&lt;/p>
+&lt;p>&lt;img src="https://upload-images.jianshu.io/upload_images/18509379-b2199d257be6b93e.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/953/format/webp" alt="img">&lt;/p>
+&lt;h3 id="resolver">Resolver&lt;/h3>
+&lt;p>提供一个用户自定义的解析、修改地址的方法，使得用户可以自己去实现地址解析的逻辑、做服务发现、地址更新等等功能。&lt;/p>
+&lt;ol>
+&lt;li>将Endpoints里的ETCD服务器地址(127.0.0.1:2379这种格式)做一次转换传给grpc框架。也可以自己重新写此resolver，做服务发现功能。例如etcd服务器地址写nacos之类的地址，在resolver中写好转换逻辑。&lt;/li>
+&lt;li>调用ClientConn的ParseServiceConfig接口告诉endpoints的负载策略是轮询&lt;/li>
+&lt;/ol>
+&lt;h3 id="balancer">Balancer&lt;/h3>
+&lt;ol>
+&lt;li>管理subConns，并收集各conn信息，更新状态至ClientConn&lt;/li>
+&lt;li>生成picker(balancer)的快照，从而ClientConn可以选择发送rpc请求的subConn&lt;/li>
+&lt;/ol>
+&lt;p>此处etcd client没有实现balancer，默认使用grpc提供的轮询的balancer&lt;/p>
+&lt;h3 id="重试策略">重试策略&lt;/h3>
+&lt;p>与一般的c-s模型不同，etcd client的重试是针对集群的重试。单个节点的断连不会造成所有节点的重连。&lt;/p>
+&lt;h4 id="重试机制">重试机制&lt;/h4>
+&lt;p>一般的重试是对同一个节点进行重试，但etcd client的自动重试不会在ETCD集群的同一节点上进行，是轮询重试集群的每个节点。重试时不会重新建连，而是使用balancer提供的transport。transport的状态更新与这一块的重试是通过balancer解耦的。&lt;/p>
+&lt;h4 id="重试条件">重试条件&lt;/h4>
+&lt;h5 id="etcd-unary拦截器">etcd unary拦截器&lt;/h5>
+&lt;p>拦截器类似http里的中间件的概念，在发送实际请求之前对报文进行篡改。一般用来添加认证，日志记录，缓存之类的功能。&lt;/p>
+&lt;p>此处etcd的一元拦截器主要做了自动重试的功能，且只会重试一些特定的错误(DeadlineExceeded, Canceled,ErrInvalidAuthToken)&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-go" data-lang="go">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#268bd2">func&lt;/span> (c &lt;span style="color:#719e07">*&lt;/span>Client) &lt;span style="color:#268bd2">unaryClientInterceptor&lt;/span>(optFuncs &lt;span style="color:#719e07">...&lt;/span>retryOption) grpc.UnaryClientInterceptor {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> 
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">...&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">if&lt;/span> &lt;span style="color:#268bd2">isContextError&lt;/span>(lastErr) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#719e07">if&lt;/span> ctx.&lt;span style="color:#268bd2">Err&lt;/span>() &lt;span style="color:#719e07">!=&lt;/span> &lt;span style="color:#cb4b16">nil&lt;/span> {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>					&lt;span style="color:#586e75">// its the context deadline or cancellation.&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>					&lt;span style="color:#719e07">return&lt;/span> lastErr
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				}
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#586e75">// its the callCtx deadline or cancellation, in which case try again.&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#719e07">continue&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			}
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">if&lt;/span> callOpts.retryAuth &lt;span style="color:#719e07">&amp;amp;&amp;amp;&lt;/span> rpctypes.&lt;span style="color:#268bd2">Error&lt;/span>(lastErr) &lt;span style="color:#719e07">==&lt;/span> rpctypes.ErrInvalidAuthToken {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#586e75">// clear auth token before refreshing it.&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#586e75">// call c.Auth.Authenticate with an invalid token will always fail the auth check on the server-side,&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#586e75">// if the server has not apply the patch of pr #12165 (https://github.com/etcd-io/etcd/pull/12165)&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#586e75">// and a rpctypes.ErrInvalidAuthToken will recursively call c.getToken until system run out of resource.&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				c.authTokenBundle.&lt;span style="color:#268bd2">UpdateAuthToken&lt;/span>(&lt;span style="color:#2aa198">&amp;#34;&amp;#34;&lt;/span>)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				gterr &lt;span style="color:#719e07">:=&lt;/span> c.&lt;span style="color:#268bd2">getToken&lt;/span>(ctx)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#719e07">if&lt;/span> gterr &lt;span style="color:#719e07">!=&lt;/span> &lt;span style="color:#cb4b16">nil&lt;/span> {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>					c.&lt;span style="color:#268bd2">GetLogger&lt;/span>().&lt;span style="color:#268bd2">Warn&lt;/span>(
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>						&lt;span style="color:#2aa198">&amp;#34;retrying of unary invoker failed to fetch new auth token&amp;#34;&lt;/span>,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>						zap.&lt;span style="color:#268bd2">String&lt;/span>(&lt;span style="color:#2aa198">&amp;#34;target&amp;#34;&lt;/span>, cc.&lt;span style="color:#268bd2">Target&lt;/span>()),
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>						zap.&lt;span style="color:#268bd2">Error&lt;/span>(gterr),
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>					)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>					&lt;span style="color:#719e07">return&lt;/span> gterr &lt;span style="color:#586e75">// lastErr must be invalid auth token&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				}
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#719e07">continue&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			}
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">...&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h4 id="重试次数">重试次数&lt;/h4>
+&lt;p>此处Invoke的大循环里，默认callOpts.max是0，也就是说尝试一次Invoke后就会return错误&lt;/p></description></item></channel></rss>

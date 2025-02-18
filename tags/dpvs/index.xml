@@ -1,0 +1,248 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Dpvs on windseek的博客</title><link>https://scottlx.github.io/tags/dpvs/</link><description>Recent content in Dpvs on windseek的博客</description><generator>Hugo</generator><language>zh-CN</language><lastBuildDate>Tue, 18 Feb 2025 11:11:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/dpvs/index.xml" rel="self" type="application/rss+xml"/><item><title>dpvs icmp session</title><link>https://scottlx.github.io/posts/dpvs-icmp/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs-icmp/</guid><description>&lt;h1 id="dpvs-icmp-session">dpvs icmp session&lt;/h1>
+&lt;p>原生的ipvs仅处理三种类型的ICMP报文：ICMP_DEST_UNREACH、ICMP_SOURCE_QUENCH和ICMP_TIME_EXCEEDED&lt;/p>
+&lt;p>对于不是这三种类型的ICMP，则设置为不相关联(related)的ICMP，返回NF_ACCEPT，之后走本机路由流程&lt;/p>
+&lt;p>dpvs对ipvs进行了一些修改，修改后逻辑如下&lt;/p>
+&lt;h2 id="icmp差错报文流程">icmp差错报文流程&lt;/h2>
+&lt;ul>
+&lt;li>
+&lt;p>__dp_vs_in&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>__dp_vs_in_icmp4 （处理icmp差错报文，入参related表示找到了关联的conn）&lt;/p>
+&lt;p>若不是ICMP_DEST_UNREACH，ICMP_SOURCE_QUENCH，ICMP_TIME_EXCEEDED，返回到_dp_vs_in走普通conn命中流程&lt;/p>
+&lt;p>icmp差错报文，需要将报文头偏移到icmp头内部的ip头，&lt;strong>根据内部ip头查找内部ip的conn&lt;/strong>。&lt;/p>
+&lt;p>若找到conn，&lt;strong>表明此ICMP报文是由之前客户端的请求报文所触发的，由真实服务器回复的ICMP报文&lt;/strong>。将related置1&lt;/p>
+&lt;p>若未找到则返回accept，返回到_dp_vs_in走普通conn命中流程&lt;/p>
+&lt;ul>
+&lt;li>​ __xmit_inbound_icmp4&lt;/li>
+&lt;/ul>
+&lt;p>​ 找net和local路由，之后走__dp_vs_xmit_icmp4&lt;/p>
+&lt;ul>
+&lt;li>__dp_vs_xmit_icmp4&lt;/li>
+&lt;/ul>
+&lt;p>​ 数据区的前8个字节恰好覆盖了TCP报文或UDP报文中的端口号字段（前四个字节）&lt;/p>
+&lt;p>inbound方向根据内部ip的conn修改数据区目的端口为conn-&amp;gt;dport，源端口改为conn-&amp;gt;localport，&lt;/p>
+&lt;p>outbound方向将目的端口改为conn-&amp;gt;cport，源端口改为conn-&amp;gt;vport&lt;/p>
+&lt;p>​&lt;/p>
+&lt;p>client (cport ) &amp;lt;&amp;ndash;&amp;gt; (vport)lb(lport) &amp;lt;&amp;ndash;&amp;gt; rs(dport)&lt;/p>
+&lt;p>​ 重新计算icmp头的checksum，走ipv4_output&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;p>&lt;img src="https://i-blog.csdnimg.cn/blog_migrate/4687e28af632425a7d0f6d66487d954b.png#pic_center" alt="报文格式">&lt;/p>
+&lt;p>&lt;strong>实际应用上的问题&lt;/strong>&lt;/p>
+&lt;p>某个rs突然下线，导致有时访问vip轮询到了不可达的rs，rs侧的网关发送了一个dest_unreach的icmp包&lt;/p>
+&lt;p>该rs的conn还未老化，__dp_vs_in_icmp4流程根据这个icmp的内部差错ip头找到了还未老化的conn，将icmp数据区的port进行修改发回给client&lt;/p>
+&lt;p>但是一般情况，rs下线后，该rs的conn会老化消失，内层conn未命中，还是走外层icmp的conn命中流程转给client。这样内部数据区的端口信息是错的（dport-&amp;gt;lport，正确情况是vport-&amp;gt;cport）&lt;/p>
+&lt;h2 id="非差错报文流程">非差错报文流程&lt;/h2>
+&lt;p>返回_dp_vs_in走普通conn命中流程&lt;/p>
+&lt;p>原本dp_vs_conn_new流程中，先查找svc。icmp的svc默认使用端口0进行查找。但是ipvsadm命令却对端口0的service添加做了限制，导致无法添加这类svc。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span> svc &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#268bd2">dp_vs_service_lookup&lt;/span>(iph&lt;span style="color:#719e07">-&amp;gt;&lt;/span>af, iph&lt;span style="color:#719e07">-&amp;gt;&lt;/span>proto, &lt;span style="color:#719e07">&amp;amp;&lt;/span>iph&lt;span style="color:#719e07">-&amp;gt;&lt;/span>daddr, &lt;span style="color:#2aa198">0&lt;/span>, &lt;span style="color:#2aa198">0&lt;/span>, mbuf, &lt;span style="color:#b58900">NULL&lt;/span>, &lt;span style="color:#719e07">&amp;amp;&lt;/span>outwall, &lt;span style="color:#268bd2">rte_lcore_id&lt;/span>());
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>若未查到走INET_ACCEPT(也就是继续往下进行走到ipv4_output_fin2查到local路由，若使用dpip addr配上了vip或lip地址，则会触发本地代答)。&lt;/p>
+&lt;p>若查到svc，则进行conn的schedule，之后会走dp_vs_laddr_bind，但是dp_vs_laddr_bind不支持icmp协议(可以整改)，最终导致svc可以查到但是conn无法建立，最后走INET_DROP。&lt;/p>
+&lt;p>概括一下：&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;ul>
+&lt;li>未命中svc，走后续local route，最终本地代答&lt;/li>
+&lt;li>命中svc后若conn无法建立，drop&lt;/li>
+&lt;li>命中svc且建立conn，发往rs或client&lt;/li>
+&lt;/ul>
+&lt;/li>
+&lt;/ul>
+&lt;h3 id="icmp的conn">icmp的conn&lt;/h3>
+&lt;p>​&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>_ports[&lt;span style="color:#2aa198">0&lt;/span>] &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#268bd2">icmp4_id&lt;/span>(ich);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>_ports[&lt;span style="color:#2aa198">1&lt;/span>] &lt;span style="color:#719e07">=&lt;/span> ich&lt;span style="color:#719e07">-&amp;gt;&lt;/span>type &lt;span style="color:#719e07">&amp;lt;&amp;lt;&lt;/span> &lt;span style="color:#2aa198">8&lt;/span> &lt;span style="color:#719e07">|&lt;/span> ich&lt;span style="color:#719e07">-&amp;gt;&lt;/span>code;
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>Inbound hash和outboundhash的五元组都使用上述这两个port进行哈希，并与conn进行关联。&lt;/p>
+&lt;p>具体的laddr和lport保存在conn里面。其中只用到laddr做l3的fullnat。由于icmp协议没有定义proto-&amp;gt;fnat_in_handler，因此fnat时，从sa_pool分配到的lport对于icmp来说没有用。&lt;/p>
+&lt;p>试想ping request和ping reply场景：&lt;/p>
+&lt;p>由于request和reply的ich-&amp;gt;type不一样，outboundhash必定不命中(且fnat流程中的laddr_bind还会修改一次outboundhashtuple的dport，修改成sapool分配的port，因此也不会命中outbound hash)。&lt;/p>
+&lt;p>&lt;strong>一次来回的ping会创建两个conn，且都只命中inboundhash。&lt;/strong>&lt;/p>
+&lt;h2 id="个人认为比较合理的方案">个人认为比较合理的方案&lt;/h2>
+&lt;h4 id="ipvsadm">ipvsadm&lt;/h4>
+&lt;p>放通port=0的svc的创建，用户需要fwd icmp to rs时，需要添加icmp类型的svc。否则icmp会被vip或者lip代答，不会透传到rs或client&lt;/p></description></item><item><title>dpvs route转发</title><link>https://scottlx.github.io/posts/dpvs-route%E8%BD%AC%E5%8F%91/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs-route%E8%BD%AC%E5%8F%91/</guid><description>&lt;h1 id="dpvs-route转发">dpvs route转发&lt;/h1>
+&lt;p>ipv4_rcv_fin 是路由转发逻辑， INET_HOOKPRE_ROUTING 中走完hook逻辑后，根据dpvs返回值走ipv4_rcv_fin&lt;/p>
+&lt;h2 id="路由表结构体">路由表结构体&lt;/h2>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">struct&lt;/span> route_entry {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">uint8_t&lt;/span> netmask;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">short&lt;/span> metric;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">uint32_t&lt;/span> flag;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">unsigned&lt;/span> &lt;span style="color:#dc322f">long&lt;/span> mtu;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">struct&lt;/span> list_head list;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">struct&lt;/span> in_addr dest; &lt;span style="color:#586e75">//cf-&amp;gt;dst.in
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">struct&lt;/span> in_addr gw;&lt;span style="color:#586e75">// 下一跳地址，0说明是直连路由，下一跳地址就是报文自己的目的地址，对应配置的cf-&amp;gt;via.in
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">struct&lt;/span> in_addr src; &lt;span style="color:#586e75">// cf-&amp;gt;src.in， 源地址策略路由匹配
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">struct&lt;/span> netif_port &lt;span style="color:#719e07">*&lt;/span>port; &lt;span style="color:#586e75">// 出接口
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#dc322f">rte_atomic32_t&lt;/span> refcnt;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>};
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h2 id="路由类型">路由类型&lt;/h2>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">/* dpvs defined. */&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define RTF_FORWARD 0x0400
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define RTF_LOCALIN 0x0800
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define RTF_DEFAULT 0x1000
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define RTF_KNI 0X2000
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define RTF_OUTWALL 0x4000
+&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h2 id="路由表类型">路由表类型&lt;/h2>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define this_route_lcore (RTE_PER_LCORE(route_lcore))
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define this_local_route_table (this_route_lcore.local_route_table)
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define this_net_route_table (this_route_lcore.net_route_table)
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define this_gfw_route_table (this_route_lcore.gfw_route_table)
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define this_num_routes (RTE_PER_LCORE(num_routes))
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define this_num_out_routes (RTE_PER_LCORE(num_out_routes))
+&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;ul>
+&lt;li>Local 类型路由&lt;/li>
+&lt;/ul>
+&lt;p>local 类型路由的作用和 Linux 下的 local 路由表的功能基本一样，主要是记录本地的 IP 地址。
+我们知道进入的数据包，过了 prerouting 后是需要经过路由查找，如果确定是本地路由（本地 IP）就会进入 LocalIn 位置，否则丢弃或进入 Forward。&lt;/p></description></item><item><title>dpvs session 同步</title><link>https://scottlx.github.io/posts/dpvs-session%E5%90%8C%E6%AD%A5/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs-session%E5%90%8C%E6%AD%A5/</guid><description>&lt;h2 id="总体架构">总体架构&lt;/h2>
+&lt;h4 id="lb-session同步采用分布式架构session创建流程触发session数据发送依次向集群内所有其他节点发送">lb session同步采用分布式架构，session创建流程触发session数据发送，依次向集群内所有其他节点发送&lt;/h4>
+&lt;p>其他节点收到新的session数据修改本地session表。
+session接收和发送各占一个独立线程。&lt;/p>
+&lt;h3 id="step1-向所有其他节点发送session数据">step1: 向所有其他节点发送session数据&lt;/h3>
+&lt;p>remote session：从别的节点同步来的session&lt;/p>
+&lt;p>local session：本节点收到数据包自己生成的session&lt;/p>
+&lt;h3 id="step2-session同步至worker">step2: session同步至worker&lt;/h3>
+&lt;h4 id="方案一有锁">方案一（有锁）：&lt;/h4>
+&lt;p>&lt;img src="https://scottlx.github.io/img/dpvs/session%E5%90%8C%E6%AD%A5%E6%9C%89%E9%94%81.png" alt="Alt text">&lt;/p>
+&lt;p>•	独立进程和core处理session同步（per numa）
+•	每个lcore分配local session和remote session，正常情况下都能直接从local session走掉
+•	同步过来的session写到remote session表
+•	session ip根据fdir走到指定进程&lt;/p>
+&lt;h4 id="方案二无锁">方案二（无锁）：&lt;/h4>
+&lt;p>&lt;img src="https://scottlx.github.io/img/dpvs/ssession%E5%90%8C%E6%AD%A5%E6%97%A0%E9%94%81.png" alt="Alt text">
+•	独立进程和core处理session同步消息
+•	每个lcore 有来local session和remote session，通过owner属性区分。
+•	同步过来的session由session_sync core发消息给对应的slave，由对应的slave进行读写，因此可以做到无锁。
+•	session ip根据fdir走到指定core&lt;/p>
+&lt;h4 id="session同步具体实现">session同步具体实现&lt;/h4>
+&lt;h5 id="亟待解决的问题">亟待解决的问题：&lt;/h5>
+&lt;ol>
+&lt;li>
+&lt;p>同步过来的session什么时候老化？&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>别的节点上线，本节点要发送哪些session？&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>别的节点下线，本节点要删除哪些session？&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>是否要响应下线节点的删除/老化请求？&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>下线节点怎么知道自己已经下线（数据面）？&lt;/p>
+&lt;/li>
+&lt;/ol>
+&lt;h5 id="解决方案">解决方案：&lt;/h5>
+&lt;h6 id="方案一-session增加owner属性c">方案一： session增加owner属性c&lt;/h6>
+&lt;p>owner属性：&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>conn.owner &lt;span style="color:#586e75">// indicates who has this session
+&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>session 同步状态转移图&lt;/p>
+&lt;p>&lt;img src="https://scottlx.github.io/img/dpvs/ssession%E5%90%8C%E6%AD%A5%E7%8A%B6%E6%80%81%E8%BD%AC%E7%A7%BB.png" alt="Alt text">&lt;/p>
+&lt;p>一条session在一个集群中，应当只有一台机器在使用，所以有一个owner属性，代表这条session被谁拥有，其它所有机器只对这条session的owner发起的增删改查请求做响应。&lt;/p>
+&lt;p>&lt;strong>同步动作&lt;/strong>
+session同步应当时实时的。在以下场景被触发：
+&lt;strong>新建session&lt;/strong>
+发送方：
+session新建完成之后：对于tcp，是握手完毕的；对于udp，是第一条连接。
+接收方：
+接收来自发送方的session，在对应core上新建这条连接，开启老化，老化时间设定为默认时间（1小时）。
+fin/rst
+发送方：
+发送删除session消息
+接收方：
+接收方接收session，做完校验后在对应core上删除session
+&lt;strong>老化&lt;/strong>
+发送方：
+老化时间超时之后，本地session删除，同时发布老化信息，告知其它lb，
+接收方：
+其它lb 做完校验后，开始老化这条session。
+&lt;strong>设备下线&lt;/strong>
+下线后通过控制器更新其他lb的session同步地址信息，不再向该设备同步，同时开始老化全部属于该设备的session。
+&lt;strong>设备上线（包含设备扩容）&lt;/strong>
+新设备：
+新上线设备引流前要接收其他设备的存量session信息，这个功能通过控制器触发完成，控制器感知到新lb上线后通知集群内其他lb向它同步存量session，session数量达到一致时（阿里gw用70%阈值）允许新lb引流。
+旧设备：
+向目的方发送全部的属于自己的session。&lt;/p></description></item><item><title>dpvs 数据流分析</title><link>https://scottlx.github.io/posts/dpvs%E6%95%B0%E6%8D%AE%E6%B5%81%E5%88%86%E6%9E%90/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs%E6%95%B0%E6%8D%AE%E6%B5%81%E5%88%86%E6%9E%90/</guid><description>&lt;h1 id="dpvs-数据流分析">dpvs 数据流分析&lt;/h1>
+&lt;h2 id="dpvs-ingress流程分析">dpvs ingress流程分析&lt;/h2>
+&lt;p>从 &lt;em>lcore_job_recv_fwd&lt;/em> 开始，这个是dpvs收取报文的开始&lt;/p>
+&lt;h3 id="设备层">设备层&lt;/h3>
+&lt;p>dev-&amp;gt;flag &amp;amp; NETIF_PORT_FLAG_FORWARD2KNI &amp;mdash;&amp;gt; 则拷贝一份mbuf到kni队列中，这个由命令行和配置文件决定（做流量镜像，用于抓包）&lt;/p>
+&lt;h3 id="eth层">eth层&lt;/h3>
+&lt;p>&lt;em>netif_rcv_mbuf&lt;/em> 这里面涉及到vlan的部分不做过多解析&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;p>不支持的协议&lt;/p>
+&lt;p>目前dpvs支持的协议为ipv4, ipv6, arp。 其它报文类型直接丢给内核。其他类型可以看 
+&lt;a href="https://en.wikipedia.org/wiki/EtherType#cite_note-ethtypes-3" target="_blank" rel="noopener">eth_types&lt;/a>。 
+&lt;a href="#dpvs_kni_ingress">to_kni&lt;/a>&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>RTE_ARP_OP_REPLY&lt;/p>
+&lt;p>复制 &lt;em>nworks-1&lt;/em> 份mbuf，发送到其它worker的arp_ring上 ( &lt;em>&lt;strong>to_other_worker&lt;/strong>&lt;/em> ), 这份报文fwd到
+&lt;a href="#arp%e5%8d%8f%e8%ae%ae">arp协议&lt;/a>.&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>RTE_ARP_OP_REQUEST&lt;/p>
+&lt;p>这份报文fwd到
+&lt;a href="#arp%e5%8d%8f%e8%ae%ae">arp协议&lt;/a>.&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;h3 id="arp协议">arp协议&lt;/h3>
+&lt;ul>
+&lt;li>
+&lt;p>arp协议处理 &lt;em>neigh_resolve_input&lt;/em>&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;p>RTE_ARP_OP_REPLY&lt;/p>
+&lt;p>建立邻居表，记录信息，并且把这个报文送给内核。
+&lt;a href="#dpvs_kni_ingress">to_kni&lt;/a>&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>RTE_ARP_OP_REQUEST&lt;/p>
+&lt;p>无条件返回网卡的ip以及mac地址 (&lt;em>free arp&lt;/em>), &lt;em>netif_xmit&lt;/em> 发送到 
+&lt;a href="#dpvs_egress%e6%8a%a5%e6%96%87%e5%88%86%e6%9e%90">core_tx_queue&lt;/a>&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>其它op_code&lt;/p>
+&lt;p>
+&lt;a href="#%e6%8a%a5%e6%96%87drop">drop&lt;/a>&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;/li>
+&lt;/ul>
+&lt;h3 id="ip层">ip层&lt;/h3>
+&lt;ul>
+&lt;li>ipv4协议 (ipv6数据流程上一致)
+&lt;ul>
+&lt;li>
+&lt;p>&lt;em>ipv4_rcv&lt;/em>&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;p>ETH_PKT_OTHERHOST&lt;/p>
+&lt;p>报文的dmac不是自己，
+&lt;a href="#%e6%8a%a5%e6%96%87drop">drop&lt;/a>&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>ipv4 协议校验&lt;/p>
+&lt;p>不通过， 
+&lt;a href="#%e6%8a%a5%e6%96%87drop">drop&lt;/a>&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>下一层协议为 IPPROTO_OSPF&lt;/p>
+&lt;p>
+&lt;a href="#dpvs_kni_ingress">to_kni&lt;/a>&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>&lt;em>INET_HOOK_PRE_ROUTING hook&lt;/em>&lt;/p>
+&lt;p>hook_list: &lt;em>dp_vs_in&lt;/em> , &lt;em>dp_vs_prerouting&lt;/em>&lt;/p>
+&lt;p>这两个都与synproxy有关系，但是我们不会启用这个代理，不过需要注意的是syncproxy不通过时会丢包 
+&lt;a href="#%e6%8a%a5%e6%96%87drop">drop&lt;/a>&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;p>dp_vs_in&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;p>非 ETH_PKT_HOST(broadcast 或者 multicast报文)或ip报文交给 &lt;em>ipv4_rcv_fin&lt;/em> 处理&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>非 udp, tcp, icmp, icmp6报文交给 &lt;em>ipv4_rcv_fin&lt;/em> 处理&lt;/p></description></item></channel></rss>

@@ -1,1 +1,38 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>排序 on windseek的博客</title><link>https://scottlx.github.io/tags/%E6%8E%92%E5%BA%8F/</link><description>Recent content in 排序 on windseek的博客</description><generator>Hugo -- gohugo.io</generator><language>zh-CN</language><lastBuildDate>Sat, 08 Oct 2022 10:36:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/%E6%8E%92%E5%BA%8F/index.xml" rel="self" type="application/rss+xml"/><item><title>优势洗牌(田忌赛马)</title><link>https://scottlx.github.io/posts/%E4%BC%98%E5%8A%BF%E6%B4%97%E7%89%8C%E7%94%B0%E5%BF%8C%E8%B5%9B%E9%A9%AC/</link><pubDate>Sat, 08 Oct 2022 10:36:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E4%BC%98%E5%8A%BF%E6%B4%97%E7%89%8C%E7%94%B0%E5%BF%8C%E8%B5%9B%E9%A9%AC/</guid><description>870. 优势洗牌 - 力扣（LeetCode） 思路 将nums1(自己的马)进行升序排序，得到下等马-&amp;gt;上等马的序列 贪心策略 若某个位置上自己的马比对手的马强，由于已经排过序了，已经是最下等的马了，因此使用这匹马 若某个位置上自己的马比对手的马弱，将该下等马放到最后的位置（对手的上等马的位</description></item></channel></rss>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>排序 on windseek的博客</title><link>https://scottlx.github.io/tags/%E6%8E%92%E5%BA%8F/</link><description>Recent content in 排序 on windseek的博客</description><generator>Hugo</generator><language>zh-CN</language><lastBuildDate>Sat, 08 Oct 2022 10:36:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/%E6%8E%92%E5%BA%8F/index.xml" rel="self" type="application/rss+xml"/><item><title>优势洗牌(田忌赛马)</title><link>https://scottlx.github.io/posts/%E4%BC%98%E5%8A%BF%E6%B4%97%E7%89%8C%E7%94%B0%E5%BF%8C%E8%B5%9B%E9%A9%AC/</link><pubDate>Sat, 08 Oct 2022 10:36:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E4%BC%98%E5%8A%BF%E6%B4%97%E7%89%8C%E7%94%B0%E5%BF%8C%E8%B5%9B%E9%A9%AC/</guid><description>&lt;p>
+&lt;a href="https://leetcode.cn/problems/advantage-shuffle/" target="_blank" rel="noopener">870. 优势洗牌 - 力扣（LeetCode）&lt;/a>&lt;/p>
+&lt;h3 id="思路">思路&lt;/h3>
+&lt;ol>
+&lt;li>将nums1(自己的马)进行升序排序，得到下等马-&amp;gt;上等马的序列&lt;/li>
+&lt;li>贪心策略
+&lt;ul>
+&lt;li>若某个位置上自己的马比对手的马强，由于已经排过序了，已经是最下等的马了，因此使用这匹马&lt;/li>
+&lt;li>若某个位置上自己的马比对手的马弱，将该下等马放到最后的位置（对手的上等马的位置）&lt;/li>
+&lt;/ul>
+&lt;/li>
+&lt;li>由于nums2的顺序固定（已知对手上场顺序），因此使用nums2的元素值对nums2的index进行排序，得到上场顺序（ids）&lt;/li>
+&lt;li>按照上场顺序(ids)依次写入ans数组中&lt;/li>
+&lt;/ol>
+&lt;h3 id="代码">代码&lt;/h3>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-go" data-lang="go">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#268bd2">func&lt;/span> &lt;span style="color:#268bd2">advantageCount&lt;/span>(nums1 []&lt;span style="color:#dc322f">int&lt;/span>, nums2 []&lt;span style="color:#dc322f">int&lt;/span>) []&lt;span style="color:#dc322f">int&lt;/span> {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	sort.&lt;span style="color:#268bd2">Ints&lt;/span>(nums1)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	n &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#b58900">len&lt;/span>(nums1)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	ans &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#b58900">make&lt;/span>([]&lt;span style="color:#dc322f">int&lt;/span>, n)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	ids &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#b58900">make&lt;/span>([]&lt;span style="color:#dc322f">int&lt;/span>, n)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">for&lt;/span> i &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#2aa198">0&lt;/span>; i &amp;lt; n; i&lt;span style="color:#719e07">++&lt;/span> {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		ids[i] = i
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	}
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	sort.&lt;span style="color:#268bd2">Slice&lt;/span>(ids, &lt;span style="color:#268bd2">func&lt;/span>(i, j &lt;span style="color:#dc322f">int&lt;/span>) &lt;span style="color:#dc322f">bool&lt;/span> { &lt;span style="color:#719e07">return&lt;/span> nums2[ids[i]] &amp;lt; nums2[ids[j]] })
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	left, right &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#2aa198">0&lt;/span>, n&lt;span style="color:#719e07">-&lt;/span>&lt;span style="color:#2aa198">1&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">for&lt;/span> _, v &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#719e07">range&lt;/span> nums1 {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">if&lt;/span> v &amp;gt; nums2[ids[left]] {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			ans[ids[left]] = v
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			left&lt;span style="color:#719e07">++&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		} &lt;span style="color:#719e07">else&lt;/span> {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			ans[ids[right]] = v
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			right&lt;span style="color:#719e07">--&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		}
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	}
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">return&lt;/span> ans
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h3 id="总结">总结&lt;/h3>
+&lt;p>灵活运用不对数组进行真正的排序，而是获得排序后的index的顺序这一技巧&lt;/p></description></item></channel></rss>
