@@ -244,7 +244,65 @@ fin/rst
 &lt;p>非 ETH_PKT_HOST(broadcast 或者 multicast报文)或ip报文交给 &lt;em>ipv4_rcv_fin&lt;/em> 处理&lt;/p>
 &lt;/li>
 &lt;li>
-&lt;p>非 udp, tcp, icmp, icmp6报文交给 &lt;em>ipv4_rcv_fin&lt;/em> 处理&lt;/p></description></item><item><title>dpdk rcu lib</title><link>https://scottlx.github.io/posts/dpdk-rcu/</link><pubDate>Fri, 08 Dec 2023 17:48:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpdk-rcu/</guid><description>&lt;p>linux的RCU主要针对的数据对象是链表，目的是提高遍历读取数据的效率，为了达到目的使用RCU机制读取数据的时候不对链表进行耗时的加锁操作。这样在同一时间可以有多个线程同时读取该链表，并且允许一个线程对链表进行修改。RCU适用于需要频繁的读取数据，而相应修改数据并不多的情景。&lt;/p>
+&lt;p>非 udp, tcp, icmp, icmp6报文交给 &lt;em>ipv4_rcv_fin&lt;/em> 处理&lt;/p></description></item><item><title>cilium datapath</title><link>https://scottlx.github.io/posts/cilium-datapath/</link><pubDate>Sun, 03 Mar 2024 18:15:00 +0800</pubDate><guid>https://scottlx.github.io/posts/cilium-datapath/</guid><description>&lt;h3 id="hook点">hook点&lt;/h3>
+&lt;p>大部分是挂载位置是tc，tc是网络协议栈初始处理挂载点&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">// linux source code: dev.c
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span>__netif_receive_skb_core
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">|&lt;/span> &lt;span style="color:#268bd2">list_for_each_entry_rcu&lt;/span>(ptype, &lt;span style="color:#719e07">&amp;amp;&lt;/span>ptype_all, list) {...} &lt;span style="color:#586e75">// packet capture
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">|&lt;/span> do_xdp_generic &lt;span style="color:#586e75">// handle generic xdp
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">|&lt;/span> sch_handle_ingress &lt;span style="color:#586e75">// tc ingress
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">|&lt;/span> tcf_classify
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">|&lt;/span> __tcf_classify &lt;span style="color:#586e75">// ebpf program is working here
+&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>如果没有下发policy，xdp就不会挂载各类filter程序&lt;/p>
+&lt;p>&lt;img src="https://rexrock.github.io/post-images/1614297388691.png" alt="cilium datapath">&lt;/p>
+&lt;h3 id="网络设备">网络设备&lt;/h3>
+&lt;p>cillium的网络方案不像常规的网桥模式（ovs，linux bridge），datapath不是一个完整的run to completion，而是分散在各个虚拟接口上，类似pipeline模式&lt;/p>
+&lt;p>cillium_host: 集群内所有podCIDR的网关，地址对容器可见&lt;/p>
+&lt;p>cilium_net: cilium_host的veth对，ipvlan模式才会用到？&lt;/p>
+&lt;p>clilium_vxlan: 用来提供Pod跨节点通信overlay封装&lt;/p>
+&lt;p>lxcXXXX: 容器veth对在主机侧的接口&lt;/p>
+&lt;h3 id="同节点pod2pod">同节点pod2pod&lt;/h3>
+&lt;p>cillium_host是所有pod的网关，因此会先arp request该地址。arp相应其实是在lxc处被代答了，arp报文不会走到cillium_host&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">// bpf_lxc.c
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span>__section_entry
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#dc322f">int&lt;/span> &lt;span style="color:#268bd2">cil_from_container&lt;/span>(&lt;span style="color:#719e07">struct&lt;/span> __ctx_buff &lt;span style="color:#719e07">*&lt;/span>ctx)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>{
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	...
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">case&lt;/span> &lt;span style="color:#268bd2">bpf_htons&lt;/span>(ETH_P_ARP)&lt;span style="color:#719e07">:&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		ret &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#268bd2">tail_call_internal&lt;/span>(ctx, CILIUM_CALL_ARP, &lt;span style="color:#719e07">&amp;amp;&lt;/span>ext_err);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">break&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	...
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#268bd2">__section_tail&lt;/span>(CILIUM_MAP_CALLS, CILIUM_CALL_ARP)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#dc322f">int&lt;/span> &lt;span style="color:#268bd2">tail_handle_arp&lt;/span>(&lt;span style="color:#719e07">struct&lt;/span> __ctx_buff &lt;span style="color:#719e07">*&lt;/span>ctx)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>{
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">union&lt;/span> macaddr mac &lt;span style="color:#719e07">=&lt;/span> THIS_INTERFACE_MAC;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">union&lt;/span> macaddr smac;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	__be32 sip;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	__be32 tip;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">/* Pass any unknown ARP requests to the Linux stack */&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">if&lt;/span> (&lt;span style="color:#719e07">!&lt;/span>&lt;span style="color:#268bd2">arp_validate&lt;/span>(ctx, &lt;span style="color:#719e07">&amp;amp;&lt;/span>mac, &lt;span style="color:#719e07">&amp;amp;&lt;/span>smac, &lt;span style="color:#719e07">&amp;amp;&lt;/span>sip, &lt;span style="color:#719e07">&amp;amp;&lt;/span>tip))
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">return&lt;/span> CTX_ACT_OK;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">/*
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * The endpoint is expected to make ARP requests for its gateway IP.
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * Most of the time, the gateway IP configured on the endpoint is
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * IPV4_GATEWAY but it may not be the case if after cilium agent reload
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * a different gateway is chosen. In such a case, existing endpoints
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * will have an old gateway configured. Since we don&amp;#39;t know the IP of
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * previous gateways, we answer requests for all IPs with the exception
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * of the LXC IP (to avoid specific problems, like IP duplicate address
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * detection checks that might run within the container).
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 */&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">if&lt;/span> (tip &lt;span style="color:#719e07">==&lt;/span> LXC_IPV4)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">return&lt;/span> CTX_ACT_OK;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">return&lt;/span> &lt;span style="color:#268bd2">arp_respond&lt;/span>(ctx, &lt;span style="color:#719e07">&amp;amp;&lt;/span>mac, tip, &lt;span style="color:#719e07">&amp;amp;&lt;/span>smac, sip, &lt;span style="color:#2aa198">0&lt;/span>);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>普通ipv4报文，走handle_ipv4_from_lxc&lt;/p></description></item><item><title>dpdk rcu lib</title><link>https://scottlx.github.io/posts/dpdk-rcu/</link><pubDate>Fri, 08 Dec 2023 17:48:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpdk-rcu/</guid><description>&lt;p>linux的RCU主要针对的数据对象是链表，目的是提高遍历读取数据的效率，为了达到目的使用RCU机制读取数据的时候不对链表进行耗时的加锁操作。这样在同一时间可以有多个线程同时读取该链表，并且允许一个线程对链表进行修改。RCU适用于需要频繁的读取数据，而相应修改数据并不多的情景。&lt;/p>
 &lt;p>dpdk中由于writer和reader同时访问一段内存，删除元素的时候需要确保&lt;/p>
 &lt;ol>
 &lt;li>删除时不会将内存put回allocator，而是删掉这段内存的引用。这样确保了新的访问者不会拿到这个元素的引用，而老的访问者不会在访问过程中core掉&lt;/li>
