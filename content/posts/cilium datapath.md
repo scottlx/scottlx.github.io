@@ -1,6 +1,6 @@
 ---
 title: "cilium datapath"
-date: 2024-03-03T18:15:00+08:00
+date: 2025-03-03T18:15:00+08:00
 draft: false
 tags: ["ebpf","cilium","k8s"]
 tags_weight: 66
