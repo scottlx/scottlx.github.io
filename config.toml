@@ -1,7 +1,7 @@
 baseURL = "https://scottlx.github.io"
 disablePathToLower = false
 languageCode = "zh-CN"
-title = "windseek的博客"
+title = "windseek"
 theme = "Hugo-Octopress"
 
 # Disqus shortcode
@@ -36,26 +36,29 @@ post = "/blog/:year-:month-:day-:title/" # change the post URL to look like the 
 
 [params]
 
+  tableOfContents = true
+  
   # --- Start sidebar options ---
   # Number of last posts that will be displayed in the sidebar - set to 0 or remove to hide this section
   sidebarRecentLimit = 5
 
-  # Sidebar header - passed to markdownify so you can write markdown here
-  sidebarHeader = "Sidebar Header"
-
-  # Sidebar text also supports markdown
-  # New lines can be added with two spaces at the end of line. New paragraphs can be added with two an empty line.
-  # when adding two new lines, remember to remove the indentation otherwise the new line will be treated as a codeblock
-  sidebarText = """Here's a [link to google](https://www.google.com)
-
-  New paragraph
-
-  Another paragraph which has two spaces in the end to create a new line using markdown  
-  New line but not a new paragraph
+  # Sidebar menus
+  # Enable with "sidebarMenuEnabled = true" under [params]
+  # Header text is "sidebarMenuHeader" under [params]
+  
+  sidebarHeader = "Who am I"
+  
+  sidebarText = """云原生网络开发 --> 高级网管(笑
+  
+  golang、云计算、SDN、NFV、软件架构
+  
+  记录一些工作上的笔记，主要是以太网数据面开发（包括不限于dpdk，ebpf，ovs，dpvs，vpp...)以及k8s
+  
+  也会记录一些web3方面的学习探索
+  
   """
   # Sidebar menu - if true will add a sidebar menu between sidebar text and recent posts
-  sidebarMenuEnabled = true
-  sidebarMenuHeader = "Sidebar Links"
+  sidebarMenuEnabled = false
 
   # sidebar links
   github = "https://github.com/scottlx"
@@ -66,7 +69,7 @@ post = "/blog/:year-:month-:day-:title/" # change the post URL to look like the 
   stackoverflow = ""
   linkedin = ""
   youtube = ""
-  facebook = ""
+  facebook = "https://www.facebook.com/profile.php?id=100009824623685"
   instagram = ""
 
   # --- End sidebar options ---
@@ -82,7 +85,7 @@ post = "/blog/:year-:month-:day-:title/" # change the post URL to look like the 
   author = "windseek"
 
   # This text appears in the site header under website title
-  subtitle = "golang、云计算、SDN、NFV、软件架构"
+  subtitle = "be curious, be free"
 
   # Search engine URL
   searchEngineURL = "https://www.google.com/search"
@@ -164,24 +167,24 @@ post = "/blog/:year-:month-:day-:title/" # change the post URL to look like the 
 # If navigationNewWindow (under [params]) is set to true then all links except root ("/") will open in a new window
 # If it does not exist or is set to false then links will open in the same window
   [[menu.main]]
-    identifier = "tools"
-    name = "工具"
-    url = "/tools/"
-    weight = 2
+    identifier = "Blog"
+    name = "归档"
+    url = "/"
+    weight = -10
 
   [[menu.main]]
-    identifier = "archives"
-    name = "归档"
+    identifier = "Archives"
+    name = "Archives"
     url = "/archives/"
-    weight = 3
+    weight = -9
 
-
-
-# Sidebar menus
-# Enable with "sidebarMenuEnabled = true" under [params]
-# Header text is "sidebarMenuHeader" under [params]
-
-[[menu.sidebar]]
-  Name = "About me"
-  URL = "/about"
-  weight = 2
+  [[menu.main]]
+    identifier = "Cheat Sheet"
+    name = "CheatSheet"
+    url = "/cheatSheet/"
+    weight = -8
+  [[menu.main]]
+    identifier = "Aboutme"
+    name = "Aboutme"
+    url = "/about/"
+    weight = -7
