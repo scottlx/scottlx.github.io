@@ -1,6 +1,33 @@
 <!doctype html><html xmlns=http://www.w3.org/1999/xhtml xml:lang=en lang=en-us><head><meta charset=utf-8><meta name=viewport content="width=device-width,minimum-scale=1,maximum-scale=1"><link href=/css/fonts.css rel=stylesheet type=text/css><title>windseek的博客</title>
 <link rel=stylesheet href=/css/hugo-octopress.css><link rel=stylesheet href=/css/fork-awesome.min.css><link href=https://scottlx.github.io/favicon.png rel=icon><link href=/index.xml rel=alternate type=application/rss+xml title=windseek的博客><meta name=description content><meta name=keywords content><meta name=author content="windseek"><meta name=generator content="Hugo 0.145.0"></head><body><header role=banner><hgroup><h1><a href=https://scottlx.github.io/>windseek的博客</a></h1><h2>golang、云计算、SDN、NFV、软件架构</h2></hgroup></header><nav role=navigation><fieldset class=mobile-nav><select onchange="location=this.value"><option value>Navigate…</option><option value=https://scottlx.github.io/tools/>» 工具</option><option value=https://scottlx.github.io/archives/>» 归档</option></select></fieldset><ul class=main-navigation><li><a href=https://scottlx.github.io/tools/ title=工具 target=_blank rel="noopener noreferrer">工具</a></li><li><a href=https://scottlx.github.io/archives/ title=归档 target=_blank rel="noopener noreferrer">归档</a></li></ul><ul class=subscription></ul><form action=https://www.google.com/search method=get target=_blank rel="noopener noreferrer"><fieldset role=search><input class=search type=text name=q results=0 placeholder=Search>
-<input type=hidden name=q value=site:https://scottlx.github.io/></fieldset></form></nav><div id=main><div id=content><div class=blog-index><article><header><p class=meta>Oct 1, 2022
+<input type=hidden name=q value=site:https://scottlx.github.io/></fieldset></form></nav><div id=main><div id=content><div class=blog-index><article><header><p class=meta>Oct 3, 2022
+- 1 minute read
+- <a href=https://scottlx.github.io/posts/%E5%9F%BA%E4%BA%8E%E4%BA%8B%E5%8A%A1%E5%A4%84%E7%90%86%E7%9A%84vpp%E7%AE%A1%E6%8E%A7%E9%9D%A2agent/#disqus_thread>Comments</a>
+- <a class=label href=https://scottlx.github.io/categories/%e6%8a%80%e6%9c%af%e4%bb%8b%e7%bb%8d/>技术介绍</a></p><h1 class=entry-title><a href=https://scottlx.github.io/posts/%E5%9F%BA%E4%BA%8E%E4%BA%8B%E5%8A%A1%E5%A4%84%E7%90%86%E7%9A%84vpp%E7%AE%A1%E6%8E%A7%E9%9D%A2agent/>基于事务处理的vpp管控面agent</a></h1></header><p><h3 id=问题背景>问题背景</h3><p>vpp作为vrouter，类似物理交换机，各配置项依赖关系复杂。以下为vpp配置abf策略路由的例子：</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#719e07>typedef</span> abf_policy
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>  u32 policy_id;
+</span></span><span style=display:flex><span>  u32 acl_index;  <span style=color:#586e75>//依赖acl
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>  u8 n_paths;
+</span></span><span style=display:flex><span>  <span style=color:#dc322f>vl_api_fib_path_t</span> paths[n_paths];
+</span></span><span style=display:flex><span>};
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>autoreply define abf_policy_add_del
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>  option status<span style=color:#719e07>=</span><span style=color:#2aa198>&#34;in_progress&#34;</span>;
+</span></span><span style=display:flex><span>  u32 client_index;
+</span></span><span style=display:flex><span>  u32 context;
+</span></span><span style=display:flex><span>  <span style=color:#dc322f>bool</span> is_add;
+</span></span><span style=display:flex><span>  <span style=color:#dc322f>vl_api_abf_policy_t</span> policy;
+</span></span><span style=display:flex><span>};
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>typedef</span> abf_itf_attach
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>  u32 policy_id;
+</span></span><span style=display:flex><span>  <span style=color:#dc322f>vl_api_interface_index_t</span> sw_if_index; <span style=color:#586e75>//依赖interface，interface又会依赖其他资源
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>  u32 priority;
+</span></span><span style=display:flex><span>  <span style=color:#dc322f>bool</span> is_ipv6;
+</span></span><span style=display:flex><span>};
+</span></span></code></pre></div><p>可以看到，策略路由首先依赖acl规则，之后将abf绑定至接口时需要依赖对应interface的index，且创建interface又需要依赖其他资源（绑定vrf等）。</p><p>除此之外，vpp配置写入存在中间状态与崩溃的问题，且无法避免。“崩溃”类似数据库写入的概念。数据必须要成功写入磁盘、磁带等持久化存储器后才能拥有持久性，只存储在，内存中的数据，一旦遇到应用程序忽然崩溃，或者数据库、操作系统一侧的崩溃，甚至是机器突然断电宕机等情况就会丢失，这些意外情况都统称为“崩溃”。</p><p>因此，为了解决vpp（物理交换机也适用）各配置项的依赖关系，以及保证原子性和持久性，实现崩溃恢复，需要在管控面agent侧处理好上述问题。</p><h3 id=事务处理>事务处理</h3><p>本人对分布式事务领域涉及不深，以下摘自于</p><p>本地事务（也可称为局部事务），是单个服务使用单个数据源场景，也就是最基本的本地数据落盘的事务。本地事务要求底层数据源需要支持事务的开启、终止、提交、回滚、嵌套等。在数据库领域（ARIES理论，基于语义的恢复与隔离），感兴趣的可以研究下commiting logging机制（OceanBase）和shadow paging</p><p>全局事务，是单个服务多个数据源场景。主要目的是为了解决事务一致性问题，并做到统一提交，统一回滚的功能。例如我有一个全局事务需要在A表中写入记录a（本地事务A），再在B表中写入记录b（本地事务B），A表和B表分别在两台物理机的磁盘上。在数据存储领域由X/Open XA对此发布了一个事务处理架构，且当前很多分布式事务处理框架都是基于此来设计的。主要核心如下：</p><ul><li>全局事务管理器（Transaction Manager，TM）：协调全局事务</li><li>局部资源管理器（Resource Manaeger，RM）：驱动本地事务</li><li>模型：XA，TCC，SAGA，AT 。。。</li></ul><p>感兴趣的可以研究下阿里的seata。</p><h3 id=事务处理视角看待vpp管控面>事务处理视角看待vpp管控面</h3><h4 id=本地事务>本地事务</h4><ul><li>vpp的配置是内存上的配置，不需要落盘。</li><li>vpp的每个资源的api可视为一个数据源</li><li>数据源没有实现事务的开启、终止、提交、回滚、嵌套、设置隔离级别等能力，只提供了下发，删除，读取接口</li><li>上述数据源未提供的能力需要agent来补齐</li></ul><h4 id=全局事务>全局事务</h4><ul><li>agent暴露给上层的接口可视为全局事务</li><li>有些全局事务只涉及单个数据源，有些全局事务涉及多个数据源</li><li>agent内部需要实现TM，将全局事务转为有序的本地事务列表</li><li>agent内部需要实现RM，调用vpp api，驱动本地事务的执行</li></ul><p>举例：</p></p><footer><a href=https://scottlx.github.io/posts/%E5%9F%BA%E4%BA%8E%E4%BA%8B%E5%8A%A1%E5%A4%84%E7%90%86%E7%9A%84vpp%E7%AE%A1%E6%8E%A7%E9%9D%A2agent/ rel=full-article>继续阅读 →</a></footer></article><article><header><p class=meta>Oct 1, 2022
 - 1 minute read
 - <a href=https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86srv6/#disqus_thread>Comments</a>
 - <a class=label href=https://scottlx.github.io/categories/%e6%8a%80%e6%9c%af%e4%bb%8b%e7%bb%8d/>技术介绍</a></p><h1 class=entry-title><a href=https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86srv6/>初识srv6</a></h1></header><p><p>翻译自SRv6 Network Programming

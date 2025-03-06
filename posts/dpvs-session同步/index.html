@@ -3,7 +3,7 @@
 <input type=hidden name=q value=site:https://scottlx.github.io/></fieldset></form></nav><div id=main><div id=content><div><article class=hentry role=article><header><p class=meta>Feb 18, 2025
 - 1 minute read
 - <a href=https://scottlx.github.io/posts/dpvs-session%E5%90%8C%E6%AD%A5/#disqus_thread>Comments</a>
-- <a class=label href=https://scottlx.github.io/categories/%e6%8a%80%e6%9c%af%e4%bb%8b%e7%bb%8d/>技术介绍</a></p><h1 class=entry-title>dpvs session 同步</h1></header><div class=entry-content><h2 id=总体架构>总体架构</h2><h4 id=lb-session同步采用分布式架构session创建流程触发session数据发送依次向集群内所有其他节点发送>lb session同步采用分布式架构，session创建流程触发session数据发送，依次向集群内所有其他节点发送</h4><p>其他节点收到新的session数据修改本地session表。
+- <a class=label href=https://scottlx.github.io/categories/%e6%8a%80%e6%9c%af%e4%bb%8b%e7%bb%8d/>技术介绍</a></p><h1 class=entry-title><a href=https://scottlx.github.io/posts/dpvs-session%E5%90%8C%E6%AD%A5/>dpvs session 同步</a></h1></header><div class=entry-content><h2 id=总体架构>总体架构</h2><h4 id=lb-session同步采用分布式架构session创建流程触发session数据发送依次向集群内所有其他节点发送>lb session同步采用分布式架构，session创建流程触发session数据发送，依次向集群内所有其他节点发送</h4><p>其他节点收到新的session数据修改本地session表。
 session接收和发送各占一个独立线程。</p><h3 id=step1-向所有其他节点发送session数据>step1: 向所有其他节点发送session数据</h3><p>remote session：从别的节点同步来的session</p><p>local session：本节点收到数据包自己生成的session</p><h3 id=step2-session同步至worker>step2: session同步至worker</h3><h4 id=方案一有锁>方案一（有锁）：</h4><p><img src=/img/dpvs/session%E5%90%8C%E6%AD%A5%E6%9C%89%E9%94%81.png alt="Alt text"></p><p>• 独立进程和core处理session同步（per numa）
 • 每个lcore分配local session和remote session，正常情况下都能直接从local session走掉
 • 同步过来的session写到remote session表

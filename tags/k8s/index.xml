@@ -1,4 +1,39 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>K8s on windseek的博客</title><link>https://scottlx.github.io/tags/k8s/</link><description>Recent content in K8s on windseek的博客</description><generator>Hugo</generator><language>zh-CN</language><lastBuildDate>Mon, 03 Mar 2025 18:15:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/k8s/index.xml" rel="self" type="application/rss+xml"/><item><title>cilium datapath</title><link>https://scottlx.github.io/posts/cilium-datapath/</link><pubDate>Mon, 03 Mar 2025 18:15:00 +0800</pubDate><guid>https://scottlx.github.io/posts/cilium-datapath/</guid><description>&lt;h3 id="hook点">hook点&lt;/h3>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>K8s on windseek的博客</title><link>https://scottlx.github.io/tags/k8s/</link><description>Recent content in K8s on windseek的博客</description><generator>Hugo</generator><language>zh-CN</language><lastBuildDate>Thu, 06 Mar 2025 15:49:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/k8s/index.xml" rel="self" type="application/rss+xml"/><item><title>bpf lpm trie</title><link>https://scottlx.github.io/posts/bpf_lpm_trie/</link><pubDate>Thu, 06 Mar 2025 15:49:00 +0800</pubDate><guid>https://scottlx.github.io/posts/bpf_lpm_trie/</guid><description>&lt;p>lpm有多种实现方式，最常用的是用trie。当然也会有更简单的实现方式，例如某些特定场景用多重哈希表就能解决（ipv4地址，32个掩码对应32个哈希表）&lt;/p>
+&lt;p>从4.11内核版本开始，bpf map引入了&lt;code>BPF_MAP_TYPE_LPM_TRIE&lt;/code>&lt;/p>
+&lt;p>主要是用于匹配ip地址，内部是将数据存储在一个不平衡的trie中，key使用&lt;code>prefixlen,data&lt;/code>&lt;/p>
+&lt;p>data是以大端网络序存储的，data[0]存的是msb。&lt;/p>
+&lt;p>prefixlen支持8的整数倍，最高可以是2048。因此除了ip匹配，还可以用来做端口，协议，vpcid等等的扩充匹配。在应用层面上除了做路由表，还可以作为acl，policy等匹配过滤的底层实现&lt;/p>
+&lt;h4 id="使用方式">使用方式&lt;/h4>
+&lt;p>
+&lt;a href="https://docs.kernel.org/next/bpf/map_lpm_trie.html" target="_blank" rel="noopener">BPF_MAP_TYPE_LPM_TRIE — The Linux Kernel documentation&lt;/a>&lt;/p>
+&lt;p>除了上述基本的Ipv4的使用方式，扩展使用方式可以参考一下cillium中IPCACHE_MAP的使用&lt;/p>
+&lt;p>首先是map的定义&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">struct&lt;/span> ipcache_key {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">struct&lt;/span> bpf_lpm_trie_key lpm_key;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	__u16 cluster_id;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	__u8 pad1;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	__u8 family;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">union&lt;/span> {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">struct&lt;/span> {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			__u32		ip4;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			__u32		pad4;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			__u32		pad5;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			__u32		pad6;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		};
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">union&lt;/span> v6addr	ip6;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	};
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>} __packed;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">/* Global IP -&amp;gt; Identity map for applying egress label-based policy */&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">struct&lt;/span> {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__uint&lt;/span>(type, BPF_MAP_TYPE_LPM_TRIE);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__type&lt;/span>(key, &lt;span style="color:#719e07">struct&lt;/span> ipcache_key);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__type&lt;/span>(value, &lt;span style="color:#719e07">struct&lt;/span> remote_endpoint_info);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__uint&lt;/span>(pinning, LIBBPF_PIN_BY_NAME);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__uint&lt;/span>(max_entries, IPCACHE_MAP_SIZE);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__uint&lt;/span>(map_flags, BPF_F_NO_PREALLOC);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>} IPCACHE_MAP __section_maps_btf;
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>可以看到cillium将v4和v6合并成一个map查询，匹配条件并带上了&lt;code>cluster_id&lt;/code>&lt;/p></description></item><item><title>cilium datapath</title><link>https://scottlx.github.io/posts/cilium-datapath/</link><pubDate>Mon, 03 Mar 2025 18:15:00 +0800</pubDate><guid>https://scottlx.github.io/posts/cilium-datapath/</guid><description>&lt;h3 id="hook点">hook点&lt;/h3>
 &lt;p>大部分是挂载位置是tc，tc是网络协议栈初始处理挂载点&lt;/p>
 &lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">// linux source code: dev.c
 &lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span>__netif_receive_skb_core
