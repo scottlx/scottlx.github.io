@@ -58,7 +58,7 @@ post = "/blog/:year-:month-:day-:title/" # change the post URL to look like the 
   
   """
   # Sidebar menu - if true will add a sidebar menu between sidebar text and recent posts
-  sidebarMenuEnabled = false
+  sidebarMenuEnabled = true
 
   # sidebar links
   github = "https://github.com/scottlx"
@@ -168,7 +168,7 @@ post = "/blog/:year-:month-:day-:title/" # change the post URL to look like the 
 # If it does not exist or is set to false then links will open in the same window
   [[menu.main]]
     identifier = "Blog"
-    name = "归档"
+    name = "Blog"
     url = "/"
     weight = -10
 
