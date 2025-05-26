@@ -33,7 +33,7 @@ categoryes_weight: 96
 
 ### linux perf_events
 
-![img](https://developer.qcloudimg.com/http-save/yehe-1566041/85a13978a14744a44856fca6969df9a3.png)
+![img](/img/blobs/linuxperfevent.png)
 
 ebpf perf基于linux perf_event子系统。epbf通知用户态拷贝数据时基于perf_events的
 
@@ -454,7 +454,7 @@ _send_trace_notify(struct __ctx_buff *ctx, enum trace_point obs_point,
 
 cilium daemon启动时，会启动monitor-agent，读取perf event ring并提供api给cilium-dbg工具或envoy进行连接
 
-![cilium event](/img/cilium event.png)
+![cilium event](/img/blobs/ciliumevent.png)
 
 #### agent组件
 
@@ -824,4 +824,4 @@ func (pr *Reader) ReadInto(rec *Record) error {
 
 本人开发的基于cilium的魔改版本😉（实现基本的vpc功能）
 
-![trace](/img/trace.PNG)
+![trace](/img/blobs/trace.PNG)
