@@ -1,63 +1,6 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>DAG on windseek</title><link>https://scottlx.github.io/tags/dag/</link><description>Recent content in DAG on windseek</description><generator>Hugo</generator><language>zh-CN</language><lastBuildDate>Wed, 12 Oct 2022 21:42:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/dag/index.xml" rel="self" type="application/rss+xml"/><item><title>拓扑排序(选课)</title><link>https://scottlx.github.io/posts/%E6%8B%93%E6%89%91%E6%8E%92%E5%BA%8F/</link><pubDate>Wed, 12 Oct 2022 21:42:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E6%8B%93%E6%89%91%E6%8E%92%E5%BA%8F/</guid><description>&lt;p>
-&lt;a href="https://leetcode.cn/problems/course-schedule/" target="_blank" rel="noopener">207. 课程表 - 力扣（LeetCode）&lt;/a>&lt;/p>
-&lt;h2 id="思路">思路&lt;/h2>
-&lt;p>课程之间的依赖关系可以用图来表示&lt;/p>
-&lt;ul>
-&lt;li>顶点：课程&lt;/li>
-&lt;li>边：有向的边，起点是前置课程，终点是后置课程&lt;/li>
-&lt;/ul>
-&lt;p>这种图叫做AOV（Activity On Vertex）网络，字面意思就是边代表了节点之间的活动的先后关系。&lt;/p>
-&lt;p>按照题意，这个图是无环的（课程不能循环依赖），也就是DAG图。DAG图其实就是一颗树，只不过根节点是一个虚拟根节点（可以有多个起始根节点，但外面可以用一个虚拟根节点作为他们的父节点）。&lt;/p>
-&lt;p>因此，可以用广度优先遍历（BFS）来求解。队列存放可以选的课程（入度为0），依次出队列（选课）。直到队列为空（没有课可以选了），看是否已经学完所有的课程&lt;/p>
-&lt;ul>
-&lt;li>入度：指向自己的边的数量，入度为0表示自己没有前置课程，可以入队列&lt;/li>
-&lt;li>出度：指向别人的边。用一个数据结构记录每个节点的出度列表。当某个节点出队列时，更新本节点的出度列表里所有节点的入度（-1）&lt;/li>
-&lt;/ul>
-&lt;h2 id="代码">代码&lt;/h2>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-go" data-lang="go">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#268bd2">func&lt;/span> &lt;span style="color:#268bd2">canFinish&lt;/span>(numCourses &lt;span style="color:#dc322f">int&lt;/span>, prerequisites [][]&lt;span style="color:#dc322f">int&lt;/span>) &lt;span style="color:#dc322f">bool&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">//保存各课程的入度 空间O(v)&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> indegree &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#b58900">make&lt;/span>([]&lt;span style="color:#dc322f">int&lt;/span>, numCourses)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// 保存各课程的出度列表 空间O(e)&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> courseMp &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#b58900">make&lt;/span>(&lt;span style="color:#268bd2">map&lt;/span>[&lt;span style="color:#dc322f">int&lt;/span>][]&lt;span style="color:#dc322f">int&lt;/span>)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">//时间 O(e)&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">for&lt;/span> _, pre &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#719e07">range&lt;/span>(prerequisites) {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> indegree[pre[&lt;span style="color:#2aa198">0&lt;/span>]]&lt;span style="color:#719e07">++&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> courseMp[pre[&lt;span style="color:#2aa198">1&lt;/span>]] = &lt;span style="color:#b58900">append&lt;/span>(courseMp[pre[&lt;span style="color:#2aa198">1&lt;/span>]], pre[&lt;span style="color:#2aa198">0&lt;/span>])
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#268bd2">var&lt;/span> q []&lt;span style="color:#dc322f">int&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// 已经学习了的课程的计数&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#268bd2">var&lt;/span> num &lt;span style="color:#dc322f">int&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// 初始入度为0的课程加入队列&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">for&lt;/span> course, depends &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#719e07">range&lt;/span>(indegree) {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">if&lt;/span> depends &lt;span style="color:#719e07">==&lt;/span> &lt;span style="color:#2aa198">0&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> q = &lt;span style="color:#b58900">append&lt;/span>(q, course)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">//循环直到队列为空 时间O(v)&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">for&lt;/span> &lt;span style="color:#b58900">len&lt;/span>(q) &amp;gt; &lt;span style="color:#2aa198">0&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// 出队列&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> finished &lt;span style="color:#719e07">:=&lt;/span> q[&lt;span style="color:#2aa198">0&lt;/span>]
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> q = q[&lt;span style="color:#2aa198">1&lt;/span>:]
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> num&lt;span style="color:#719e07">++&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// 更新入度数据结构(slice)&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// 从出度课程列表中直接取受影响的课程&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">for&lt;/span> _, course &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#719e07">range&lt;/span>(courseMp[finished]) {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> indegree[course]&lt;span style="color:#719e07">--&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// 入度-1后若为0，则可以入队列&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">if&lt;/span> indegree[course] &lt;span style="color:#719e07">==&lt;/span> &lt;span style="color:#2aa198">0&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> q = &lt;span style="color:#b58900">append&lt;/span>(q, course)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">//是否学完&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">return&lt;/span> num &lt;span style="color:#719e07">==&lt;/span> numCourses
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;ul>
-&lt;li>时间复杂度：O (v+e)&lt;/li>
-&lt;li>空间复杂度: O(v+e)&lt;/li>
-&lt;/ul>
-&lt;p>若需要省空间，不需要省时间，可以不使用courseMp存放出度数组，每次重新遍历prerequisites 获取出度数组。此时处理每个节点都需要重新遍历所有的边，因此：&lt;/p></description></item></channel></rss>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>DAG on windseek</title><link>https://scottlx.github.io/tags/dag/</link><description>Recent content in DAG on windseek</description><generator>Hugo -- gohugo.io</generator><language>zh-CN</language><lastBuildDate>Wed, 12 Oct 2022 21:42:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/dag/index.xml" rel="self" type="application/rss+xml"/><item><title>拓扑排序(选课)</title><link>https://scottlx.github.io/posts/%E6%8B%93%E6%89%91%E6%8E%92%E5%BA%8F/</link><pubDate>Wed, 12 Oct 2022 21:42:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E6%8B%93%E6%89%91%E6%8E%92%E5%BA%8F/</guid><description>207. 课程表 - 力扣（LeetCode）
+思路 课程之间的依赖关系可以用图来表示
+顶点：课程 边：有向的边，起点是前置课程，终点是后置课程 这种图叫做AOV（Activity On Vertex）网络，字面意思就是边代表了节点之间的活动的先后关系。
+按照题意，这个图是无环的（课程不能循环依赖），也就是DAG图。DAG图其实就是一颗树，只不过根节点是一个虚拟根节点（可以有多个起始根节点，但外面可以用一个虚拟根节点作为他们的父节点）。
+因此，可以用广度优先遍历（BFS）来求解。队列存放可以选的课程（入度为0），依次出队列（选课）。直到队列为空（没有课可以选了），看是否已经学完所有的课程
+入度：指向自己的边的数量，入度为0表示自己没有前置课程，可以入队列 出度：指向别人的边。用一个数据结构记录每个节点的出度列表。当某个节点出队列时，更新本节点的出度列表里所有节点的入度（-1） 代码 func canFinish(numCourses int, prerequisites [][]int) bool { //保存各课程的入度 空间O(v) indegree := make([]int, numCourses) // 保存各课程的出度列表 空间O(e) courseMp := make(map[int][]int) //时间 O(e) for _, pre := range(prerequisites) { indegree[pre[0]]++ courseMp[pre[1]] = append(courseMp[pre[1]], pre[0]) } var q []int // 已经学习了的课程的计数 var num int // 初始入度为0的课程加入队列 for course, depends := range(indegree) { if depends == 0 { q = append(q, course) } } //循环直到队列为空 时间O(v) for len(q) &amp;gt; 0 { // 出队列 finished := q[0] q = q[1:] num++ // 更新入度数据结构(slice) // 从出度课程列表中直接取受影响的课程 for _, course := range(courseMp[finished]) { indegree[course]-- // 入度-1后若为0，则可以入队列 if indegree[course] == 0 { q = append(q, course) } } } //是否学完 return num == numCourses } 时间复杂度：O (v+e) 空间复杂度: O(v+e) 若需要省空间，不需要省时间，可以不使用courseMp存放出度数组，每次重新遍历prerequisites 获取出度数组。此时处理每个节点都需要重新遍历所有的边，因此：</description></item></channel></rss>

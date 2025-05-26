@@ -1,85 +1,9 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>数位dp on windseek</title><link>https://scottlx.github.io/tags/%E6%95%B0%E4%BD%8Ddp/</link><description>Recent content in 数位dp on windseek</description><generator>Hugo</generator><language>zh-CN</language><lastBuildDate>Mon, 20 Mar 2023 11:50:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/%E6%95%B0%E4%BD%8Ddp/index.xml" rel="self" type="application/rss+xml"/><item><title>数位dp</title><link>https://scottlx.github.io/posts/%E6%95%B0%E4%BD%8Ddp/</link><pubDate>Mon, 20 Mar 2023 11:50:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E6%95%B0%E4%BD%8Ddp/</guid><description>&lt;h2 id="题目特征">题目特征&lt;/h2>
-&lt;ul>
-&lt;li>
-&lt;p>要求统计满足一定条件的数的数量（即，最终目的为计数，若要结果则只能回溯爆搜得到）；&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>这些条件经过转化后可以使用「数位」的思想去理解和判断；&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>输入会提供一个数字区间（有时也只提供上界）来作为统计的限制；&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>上界很大（比如 10^{18}），暴力枚举验证会超时。&lt;/p>
-&lt;/li>
-&lt;/ul>
-&lt;h2 id="思路">思路&lt;/h2>
-&lt;p>从高到低枚举每一位，统计符合target的个数，并记录到dp数组中。枚举完毕之后则得到答案。&lt;/p>
-&lt;p>因此数位dp的第一个状态都是数位的位置，第二个状态由题意来定&lt;/p>
-&lt;h2 id="模板">模板&lt;/h2>
-&lt;p>以leetcode1012为例，统计小于等于n的数字中每一位的数字至少重复一次的个数。&lt;/p>
-&lt;p>模板时灵神的模板。难点主要是mask，isLimit，isNum这几个标识&lt;/p>
-&lt;ul>
-&lt;li>mask即dp的第二个状态，这边用到了状态压缩的思想，将0到9选过的状态压缩成一个数字(否则要10个状态)&lt;/li>
-&lt;li>isLimit 标识了本次(i)选择的范围，是否受到n的影响。如果不引进这个变量，则需要考虑当前数字的最高位来决定本次的范围(最高位==n的最高位时，本次的范围是[0,s[i]],最高位&amp;lt;n的最高位时，本次的范围是[0,9])。可以发现这个限制是有传递的性质的，因此引入这个变量能简化范围的选择过程。&lt;/li>
-&lt;li>isNum 标识了本次(i)之前是否有数字，换句话说本次(i)是否是第一个数字(最高位)。这个标识主要是解决前导0的问题，否则答案里会重复(前导两个0和前导三个0虽然是同个数字，但都会被记入答案)&lt;/li>
-&lt;/ul>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-go" data-lang="go">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#268bd2">func&lt;/span> &lt;span style="color:#268bd2">numDupDigitsAtMostN&lt;/span>(n &lt;span style="color:#dc322f">int&lt;/span>) (ans &lt;span style="color:#dc322f">int&lt;/span>) {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	s &lt;span style="color:#719e07">:=&lt;/span> strconv.&lt;span style="color:#268bd2">Itoa&lt;/span>(n) &lt;span style="color:#586e75">// s[0]是最高位&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">/* 若需要从低到高的顺序，则按如下生成
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">		for ; n &amp;gt; 0; n = n / 10 {
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 list = append(list, n%10)
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 }
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	*/&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	m &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#b58900">len&lt;/span>(s)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	dp &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#b58900">make&lt;/span>([][&lt;span style="color:#2aa198">1&lt;/span> &lt;span style="color:#719e07">&amp;lt;&amp;lt;&lt;/span> &lt;span style="color:#2aa198">10&lt;/span>]&lt;span style="color:#dc322f">int&lt;/span>, m)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">// 数位dp的第一个状态都是数位的位置，第二个状态由题意来定&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">// 问题转换为计算没有重复数字的个数，因此第二个状态记录已经选过数字的集合&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">// i 表示从高到低第i位， j是前面已经选过的数字的集合,最大为[0,9]的子集个数&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">// 例如集合 {0,2,3} 对应的二进制数为 1101 （集合的思想就是状压）&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">for&lt;/span> i &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#719e07">range&lt;/span> dp {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">for&lt;/span> j &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#719e07">range&lt;/span> dp[i] {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			dp[i][j] = &lt;span style="color:#719e07">-&lt;/span>&lt;span style="color:#2aa198">1&lt;/span> &lt;span style="color:#586e75">// -1 表示没有计算过&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">var&lt;/span> f &lt;span style="color:#268bd2">func&lt;/span>(&lt;span style="color:#dc322f">int&lt;/span>, &lt;span style="color:#dc322f">int&lt;/span>, &lt;span style="color:#dc322f">bool&lt;/span>, &lt;span style="color:#dc322f">bool&lt;/span>) &lt;span style="color:#dc322f">int&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">// mask是dp数组中第二个状态&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">// isLimit表示当前是否受到n的约束，若为true表示当前位最大填s[i]&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">// 若isLimit为true时填了s[i],则isLimit为true传递到下一位，下一位也受到n的约束&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">// isNum主要是处理前导零的问题。isNum表示i前面是否填了数字&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">// 若isNum为true，则i位可以从0开始填；否则，说明i是第一位，i可以不填，或者至少填1(因为不能有前导0)&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	f = &lt;span style="color:#268bd2">func&lt;/span>(i, mask &lt;span style="color:#dc322f">int&lt;/span>, isLimit, isNum &lt;span style="color:#dc322f">bool&lt;/span>) (res &lt;span style="color:#dc322f">int&lt;/span>) {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">if&lt;/span> i &lt;span style="color:#719e07">==&lt;/span> m { &lt;span style="color:#586e75">// base case，遍历完毕&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			&lt;span style="color:#719e07">if&lt;/span> isNum { &lt;span style="color:#586e75">// 且不是全部跳过不选的&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#719e07">return&lt;/span> &lt;span style="color:#2aa198">1&lt;/span> &lt;span style="color:#586e75">// 得到了一个合法数字&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			&lt;span style="color:#719e07">return&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">if&lt;/span> !isLimit &lt;span style="color:#719e07">&amp;amp;&amp;amp;&lt;/span> isNum {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			dv &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#719e07">&amp;amp;&lt;/span>dp[i][mask]
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			&lt;span style="color:#719e07">if&lt;/span> &lt;span style="color:#719e07">*&lt;/span>dv &lt;span style="color:#719e07">&amp;gt;=&lt;/span> &lt;span style="color:#2aa198">0&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#719e07">return&lt;/span> &lt;span style="color:#719e07">*&lt;/span>dv &lt;span style="color:#586e75">// dp匹配直接返回&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			&lt;span style="color:#719e07">defer&lt;/span> &lt;span style="color:#268bd2">func&lt;/span>() { &lt;span style="color:#719e07">*&lt;/span>dv = res }() &lt;span style="color:#586e75">// 未匹配到，则在return之后更新dp数组&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">if&lt;/span> !isNum { &lt;span style="color:#586e75">// 可以跳过当前数位&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			res &lt;span style="color:#719e07">+=&lt;/span> &lt;span style="color:#268bd2">f&lt;/span>(i&lt;span style="color:#719e07">+&lt;/span>&lt;span style="color:#2aa198">1&lt;/span>, mask, &lt;span style="color:#cb4b16">false&lt;/span>, &lt;span style="color:#cb4b16">false&lt;/span>)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		d &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#2aa198">0&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">if&lt;/span> !isNum {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			d = &lt;span style="color:#2aa198">1&lt;/span> &lt;span style="color:#586e75">// 如果前面没有填数字，必须从 1 开始（因为不能有前导零）&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		up &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#2aa198">9&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">if&lt;/span> isLimit {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			up = &lt;span style="color:#b58900">int&lt;/span>(s[i] &lt;span style="color:#719e07">-&lt;/span> &lt;span style="color:#2aa198">&amp;#39;0&amp;#39;&lt;/span>) &lt;span style="color:#586e75">// 如果前面填的数字都和 n 的一样，那么这一位至多填数字 s[i]（否则就超过 n 啦）&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">for&lt;/span> ; d &lt;span style="color:#719e07">&amp;lt;=&lt;/span> up; d&lt;span style="color:#719e07">++&lt;/span> { &lt;span style="color:#586e75">// 枚举要填入的数字 d&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			&lt;span style="color:#719e07">if&lt;/span> mask&lt;span style="color:#719e07">&amp;gt;&amp;gt;&lt;/span>d&lt;span style="color:#719e07">&amp;amp;&lt;/span>&lt;span style="color:#2aa198">1&lt;/span> &lt;span style="color:#719e07">==&lt;/span> &lt;span style="color:#2aa198">0&lt;/span> { &lt;span style="color:#586e75">// d 不在 mask 中&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				res &lt;span style="color:#719e07">+=&lt;/span> &lt;span style="color:#268bd2">f&lt;/span>(i&lt;span style="color:#719e07">+&lt;/span>&lt;span style="color:#2aa198">1&lt;/span>, mask|&lt;span style="color:#2aa198">1&lt;/span>&lt;span style="color:#719e07">&amp;lt;&amp;lt;&lt;/span>d, isLimit &lt;span style="color:#719e07">&amp;amp;&amp;amp;&lt;/span> d &lt;span style="color:#719e07">==&lt;/span> up, &lt;span style="color:#cb4b16">true&lt;/span>) &lt;span style="color:#586e75">// d写入mask， isLimit传递&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			} &lt;span style="color:#586e75">// 否则该分支的结果为0&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">return&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">return&lt;/span> n &lt;span style="color:#719e07">-&lt;/span> &lt;span style="color:#268bd2">f&lt;/span>(&lt;span style="color:#2aa198">0&lt;/span>, &lt;span style="color:#2aa198">0&lt;/span>, &lt;span style="color:#cb4b16">true&lt;/span>, &lt;span style="color:#cb4b16">false&lt;/span>)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div></description></item></channel></rss>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>数位dp on windseek</title><link>https://scottlx.github.io/tags/%E6%95%B0%E4%BD%8Ddp/</link><description>Recent content in 数位dp on windseek</description><generator>Hugo -- gohugo.io</generator><language>zh-CN</language><lastBuildDate>Mon, 20 Mar 2023 11:50:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/%E6%95%B0%E4%BD%8Ddp/index.xml" rel="self" type="application/rss+xml"/><item><title>数位dp</title><link>https://scottlx.github.io/posts/%E6%95%B0%E4%BD%8Ddp/</link><pubDate>Mon, 20 Mar 2023 11:50:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E6%95%B0%E4%BD%8Ddp/</guid><description>题目特征 要求统计满足一定条件的数的数量（即，最终目的为计数，若要结果则只能回溯爆搜得到）；
+这些条件经过转化后可以使用「数位」的思想去理解和判断；
+输入会提供一个数字区间（有时也只提供上界）来作为统计的限制；
+上界很大（比如 10^{18}），暴力枚举验证会超时。
+思路 从高到低枚举每一位，统计符合target的个数，并记录到dp数组中。枚举完毕之后则得到答案。
+因此数位dp的第一个状态都是数位的位置，第二个状态由题意来定
+模板 以leetcode1012为例，统计小于等于n的数字中每一位的数字至少重复一次的个数。
+模板时灵神的模板。难点主要是mask，isLimit，isNum这几个标识
+mask即dp的第二个状态，这边用到了状态压缩的思想，将0到9选过的状态压缩成一个数字(否则要10个状态) isLimit 标识了本次(i)选择的范围，是否受到n的影响。如果不引进这个变量，则需要考虑当前数字的最高位来决定本次的范围(最高位==n的最高位时，本次的范围是[0,s[i]],最高位&amp;lt;n的最高位时，本次的范围是[0,9])。可以发现这个限制是有传递的性质的，因此引入这个变量能简化范围的选择过程。 isNum 标识了本次(i)之前是否有数字，换句话说本次(i)是否是第一个数字(最高位)。这个标识主要是解决前导0的问题，否则答案里会重复(前导两个0和前导三个0虽然是同个数字，但都会被记入答案) func numDupDigitsAtMostN(n int) (ans int) { s := strconv.Itoa(n) // s[0]是最高位 /* 若需要从低到高的顺序，则按如下生成 for ; n &amp;gt; 0; n = n / 10 { list = append(list, n%10) } */ m := len(s) dp := make([][1 &amp;lt;&amp;lt; 10]int, m) // 数位dp的第一个状态都是数位的位置，第二个状态由题意来定 // 问题转换为计算没有重复数字的个数，因此第二个状态记录已经选过数字的集合 // i 表示从高到低第i位， j是前面已经选过的数字的集合,最大为[0,9]的子集个数 // 例如集合 {0,2,3} 对应的二进制数为 1101 （集合的思想就是状压） for i := range dp { for j := range dp[i] { dp[i][j] = -1 // -1 表示没有计算过 } } var f func(int, int, bool, bool) int // mask是dp数组中第二个状态 // isLimit表示当前是否受到n的约束，若为true表示当前位最大填s[i] // 若isLimit为true时填了s[i],则isLimit为true传递到下一位，下一位也受到n的约束 // isNum主要是处理前导零的问题。isNum表示i前面是否填了数字 // 若isNum为true，则i位可以从0开始填；否则，说明i是第一位，i可以不填，或者至少填1(因为不能有前导0) f = func(i, mask int, isLimit, isNum bool) (res int) { if i == m { // base case，遍历完毕 if isNum { // 且不是全部跳过不选的 return 1 // 得到了一个合法数字 } return } if !</description></item></channel></rss>

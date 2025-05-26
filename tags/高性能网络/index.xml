@@ -1,381 +1,90 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>高性能网络 on windseek</title><link>https://scottlx.github.io/tags/%E9%AB%98%E6%80%A7%E8%83%BD%E7%BD%91%E7%BB%9C/</link><description>Recent content in 高性能网络 on windseek</description><generator>Hugo</generator><language>zh-CN</language><lastBuildDate>Tue, 18 Feb 2025 11:11:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/%E9%AB%98%E6%80%A7%E8%83%BD%E7%BD%91%E7%BB%9C/index.xml" rel="self" type="application/rss+xml"/><item><title>dpvs icmp session</title><link>https://scottlx.github.io/posts/dpvs-icmp/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs-icmp/</guid><description>&lt;p>原生的ipvs仅处理三种类型的ICMP报文：ICMP_DEST_UNREACH、ICMP_SOURCE_QUENCH和ICMP_TIME_EXCEEDED&lt;/p>
-&lt;p>对于不是这三种类型的ICMP，则设置为不相关联(related)的ICMP，返回NF_ACCEPT，之后走本机路由流程&lt;/p>
-&lt;p>dpvs对ipvs进行了一些修改，修改后逻辑如下&lt;/p>
-&lt;h2 id="icmp差错报文流程">icmp差错报文流程&lt;/h2>
-&lt;ul>
-&lt;li>
-&lt;p>__dp_vs_in&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>__dp_vs_in_icmp4 （处理icmp差错报文，入参related表示找到了关联的conn）&lt;/p>
-&lt;p>若不是ICMP_DEST_UNREACH，ICMP_SOURCE_QUENCH，ICMP_TIME_EXCEEDED，返回到_dp_vs_in走普通conn命中流程&lt;/p>
-&lt;p>icmp差错报文，需要将报文头偏移到icmp头内部的ip头，&lt;strong>根据内部ip头查找内部ip的conn&lt;/strong>。&lt;/p>
-&lt;p>若找到conn，&lt;strong>表明此ICMP报文是由之前客户端的请求报文所触发的，由真实服务器回复的ICMP报文&lt;/strong>。将related置1&lt;/p>
-&lt;p>若未找到则返回accept，返回到_dp_vs_in走普通conn命中流程&lt;/p>
-&lt;ul>
-&lt;li>​ __xmit_inbound_icmp4&lt;/li>
-&lt;/ul>
-&lt;p>​ 找net和local路由，之后走__dp_vs_xmit_icmp4&lt;/p>
-&lt;ul>
-&lt;li>__dp_vs_xmit_icmp4&lt;/li>
-&lt;/ul>
-&lt;p>​ 数据区的前8个字节恰好覆盖了TCP报文或UDP报文中的端口号字段（前四个字节）&lt;/p>
-&lt;p>inbound方向根据内部ip的conn修改数据区目的端口为conn-&amp;gt;dport，源端口改为conn-&amp;gt;localport，&lt;/p>
-&lt;p>outbound方向将目的端口改为conn-&amp;gt;cport，源端口改为conn-&amp;gt;vport&lt;/p>
-&lt;p>​&lt;/p>
-&lt;p>client (cport ) &amp;lt;&amp;ndash;&amp;gt; (vport)lb(lport) &amp;lt;&amp;ndash;&amp;gt; rs(dport)&lt;/p>
-&lt;p>​ 重新计算icmp头的checksum，走ipv4_output&lt;/p>
-&lt;/li>
-&lt;/ul>
-&lt;p>&lt;img src="https://scottlx.github.io/img/dpvs/icmp%E5%B7%AE%E9%94%99%E6%8A%A5%E6%96%87.png" alt="报文格式">&lt;/p>
-&lt;p>&lt;strong>实际应用上的问题&lt;/strong>&lt;/p>
-&lt;p>某个rs突然下线，导致有时访问vip轮询到了不可达的rs，rs侧的网关发送了一个dest_unreach的icmp包&lt;/p>
-&lt;p>该rs的conn还未老化，__dp_vs_in_icmp4流程根据这个icmp的内部差错ip头找到了还未老化的conn，将icmp数据区的port进行修改发回给client&lt;/p>
-&lt;p>但是一般情况，rs下线后，该rs的conn会老化消失，内层conn未命中，还是走外层icmp的conn命中流程转给client。这样内部数据区的端口信息是错的（dport-&amp;gt;lport，正确情况是vport-&amp;gt;cport）&lt;/p>
-&lt;h2 id="非差错报文流程">非差错报文流程&lt;/h2>
-&lt;p>返回_dp_vs_in走普通conn命中流程&lt;/p>
-&lt;p>原本dp_vs_conn_new流程中，先查找svc。icmp的svc默认使用端口0进行查找。但是ipvsadm命令却对端口0的service添加做了限制，导致无法添加这类svc。&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span> svc &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#268bd2">dp_vs_service_lookup&lt;/span>(iph&lt;span style="color:#719e07">-&amp;gt;&lt;/span>af, iph&lt;span style="color:#719e07">-&amp;gt;&lt;/span>proto, &lt;span style="color:#719e07">&amp;amp;&lt;/span>iph&lt;span style="color:#719e07">-&amp;gt;&lt;/span>daddr, &lt;span style="color:#2aa198">0&lt;/span>, &lt;span style="color:#2aa198">0&lt;/span>, mbuf, &lt;span style="color:#b58900">NULL&lt;/span>, &lt;span style="color:#719e07">&amp;amp;&lt;/span>outwall, &lt;span style="color:#268bd2">rte_lcore_id&lt;/span>());
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>若未查到走INET_ACCEPT(也就是继续往下进行走到ipv4_output_fin2查到local路由，若使用dpip addr配上了vip或lip地址，则会触发本地代答)。&lt;/p>
-&lt;p>若查到svc，则进行conn的schedule，之后会走dp_vs_laddr_bind，但是dp_vs_laddr_bind不支持icmp协议(可以整改)，最终导致svc可以查到但是conn无法建立，最后走INET_DROP。&lt;/p>
-&lt;p>概括一下：&lt;/p>
-&lt;ul>
-&lt;li>
-&lt;ul>
-&lt;li>未命中svc，走后续local route，最终本地代答&lt;/li>
-&lt;li>命中svc后若conn无法建立，drop&lt;/li>
-&lt;li>命中svc且建立conn，发往rs或client&lt;/li>
-&lt;/ul>
-&lt;/li>
-&lt;/ul>
-&lt;h3 id="icmp的conn">icmp的conn&lt;/h3>
-&lt;p>​&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>_ports[&lt;span style="color:#2aa198">0&lt;/span>] &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#268bd2">icmp4_id&lt;/span>(ich);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>_ports[&lt;span style="color:#2aa198">1&lt;/span>] &lt;span style="color:#719e07">=&lt;/span> ich&lt;span style="color:#719e07">-&amp;gt;&lt;/span>type &lt;span style="color:#719e07">&amp;lt;&amp;lt;&lt;/span> &lt;span style="color:#2aa198">8&lt;/span> &lt;span style="color:#719e07">|&lt;/span> ich&lt;span style="color:#719e07">-&amp;gt;&lt;/span>code;
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>Inbound hash和outboundhash的五元组都使用上述这两个port进行哈希，并与conn进行关联。&lt;/p>
-&lt;p>具体的laddr和lport保存在conn里面。其中只用到laddr做l3的fullnat。由于icmp协议没有定义proto-&amp;gt;fnat_in_handler，因此fnat时，从sa_pool分配到的lport对于icmp来说没有用。&lt;/p>
-&lt;p>试想ping request和ping reply场景：&lt;/p>
-&lt;p>由于request和reply的ich-&amp;gt;type不一样，outboundhash必定不命中(且fnat流程中的laddr_bind还会修改一次outboundhashtuple的dport，修改成sapool分配的port，因此也不会命中outbound hash)。&lt;/p>
-&lt;p>&lt;strong>一次来回的ping会创建两个conn，且都只命中inboundhash。&lt;/strong>&lt;/p>
-&lt;h2 id="个人认为比较合理的方案">个人认为比较合理的方案&lt;/h2>
-&lt;h4 id="ipvsadm">ipvsadm&lt;/h4>
-&lt;p>放通port=0的svc的创建，用户需要fwd icmp to rs时，需要添加icmp类型的svc。否则icmp会被vip或者lip代答，不会透传到rs或client&lt;/p>
-&lt;h4 id="icmp差错报文">icmp差错报文&lt;/h4>
-&lt;p>保持原状，对找不到关联的conn连接的差错报文进行drop。&lt;/p></description></item><item><title>dpvs route转发</title><link>https://scottlx.github.io/posts/dpvs-route%E8%BD%AC%E5%8F%91/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs-route%E8%BD%AC%E5%8F%91/</guid><description>&lt;p>ipv4_rcv_fin 是路由转发逻辑， INET_HOOKPRE_ROUTING 中走完hook逻辑后，根据dpvs返回值走ipv4_rcv_fin&lt;/p>
-&lt;h2 id="路由表结构体">路由表结构体&lt;/h2>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">struct&lt;/span> route_entry {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">uint8_t&lt;/span> netmask;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">short&lt;/span> metric;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">uint32_t&lt;/span> flag;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">unsigned&lt;/span> &lt;span style="color:#dc322f">long&lt;/span> mtu;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">struct&lt;/span> list_head list;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">struct&lt;/span> in_addr dest; &lt;span style="color:#586e75">//cf-&amp;gt;dst.in
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">struct&lt;/span> in_addr gw;&lt;span style="color:#586e75">// 下一跳地址，0说明是直连路由，下一跳地址就是报文自己的目的地址，对应配置的cf-&amp;gt;via.in
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">struct&lt;/span> in_addr src; &lt;span style="color:#586e75">// cf-&amp;gt;src.in， 源地址策略路由匹配
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">struct&lt;/span> netif_port &lt;span style="color:#719e07">*&lt;/span>port; &lt;span style="color:#586e75">// 出接口
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#dc322f">rte_atomic32_t&lt;/span> refcnt;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>};
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h2 id="路由类型">路由类型&lt;/h2>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">/* dpvs defined. */&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define RTF_FORWARD 0x0400
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define RTF_LOCALIN 0x0800
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define RTF_DEFAULT 0x1000
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define RTF_KNI 0X2000
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define RTF_OUTWALL 0x4000
-&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h2 id="路由表类型">路由表类型&lt;/h2>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define this_route_lcore (RTE_PER_LCORE(route_lcore))
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define this_local_route_table (this_route_lcore.local_route_table)
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define this_net_route_table (this_route_lcore.net_route_table)
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define this_gfw_route_table (this_route_lcore.gfw_route_table)
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define this_num_routes (RTE_PER_LCORE(num_routes))
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define this_num_out_routes (RTE_PER_LCORE(num_out_routes))
-&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;ul>
-&lt;li>Local 类型路由&lt;/li>
-&lt;/ul>
-&lt;p>local 类型路由的作用和 Linux 下的 local 路由表的功能基本一样，主要是记录本地的 IP 地址。
-我们知道进入的数据包，过了 prerouting 后是需要经过路由查找，如果确定是本地路由（本地 IP）就会进入 LocalIn 位置，否则丢弃或进入 Forward。&lt;/p></description></item><item><title>dpvs session 同步</title><link>https://scottlx.github.io/posts/dpvs-session%E5%90%8C%E6%AD%A5/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs-session%E5%90%8C%E6%AD%A5/</guid><description>&lt;h2 id="总体架构">总体架构&lt;/h2>
-&lt;h4 id="lb-session同步采用分布式架构session创建流程触发session数据发送依次向集群内所有其他节点发送">lb session同步采用分布式架构，session创建流程触发session数据发送，依次向集群内所有其他节点发送&lt;/h4>
-&lt;p>其他节点收到新的session数据修改本地session表。
-session接收和发送各占一个独立线程。&lt;/p>
-&lt;h3 id="step1-向所有其他节点发送session数据">step1: 向所有其他节点发送session数据&lt;/h3>
-&lt;p>remote session：从别的节点同步来的session&lt;/p>
-&lt;p>local session：本节点收到数据包自己生成的session&lt;/p>
-&lt;h3 id="step2-session同步至worker">step2: session同步至worker&lt;/h3>
-&lt;h4 id="方案一有锁">方案一（有锁）：&lt;/h4>
-&lt;p>&lt;img src="https://scottlx.github.io/img/dpvs/session%E5%90%8C%E6%AD%A5%E6%9C%89%E9%94%81.png" alt="Alt text">&lt;/p>
-&lt;p>•	独立进程和core处理session同步（per numa）
-•	每个lcore分配local session和remote session，正常情况下都能直接从local session走掉
-•	同步过来的session写到remote session表
-•	session ip根据fdir走到指定进程&lt;/p>
-&lt;h4 id="方案二无锁">方案二（无锁）：&lt;/h4>
-&lt;p>&lt;img src="https://scottlx.github.io/img/dpvs/session%E5%90%8C%E6%AD%A5%E6%97%A0%E9%94%81.png" alt="Alt text">
-•	独立进程和core处理session同步消息
-•	每个lcore 有来local session和remote session，通过owner属性区分。
-•	同步过来的session由session_sync core发消息给对应的slave，由对应的slave进行读写，因此可以做到无锁。
-•	session ip根据fdir走到指定core&lt;/p>
-&lt;h4 id="session同步具体实现">session同步具体实现&lt;/h4>
-&lt;h5 id="亟待解决的问题">亟待解决的问题：&lt;/h5>
-&lt;ol>
-&lt;li>
-&lt;p>同步过来的session什么时候老化？&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>别的节点上线，本节点要发送哪些session？&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>别的节点下线，本节点要删除哪些session？&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>是否要响应下线节点的删除/老化请求？&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>下线节点怎么知道自己已经下线（数据面）？&lt;/p>
-&lt;/li>
-&lt;/ol>
-&lt;h5 id="解决方案">解决方案：&lt;/h5>
-&lt;h6 id="方案一-session增加owner属性c">方案一： session增加owner属性c&lt;/h6>
-&lt;p>owner属性：&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>conn.owner &lt;span style="color:#586e75">// indicates who has this session
-&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>session 同步状态转移图&lt;/p>
-&lt;p>&lt;img src="https://scottlx.github.io/img/dpvs/session%E5%90%8C%E6%AD%A5%E7%8A%B6%E6%80%81%E8%BD%AC%E7%A7%BB.png" alt="Alt text">&lt;/p>
-&lt;p>一条session在一个集群中，应当只有一台机器在使用，所以有一个owner属性，代表这条session被谁拥有，其它所有机器只对这条session的owner发起的增删改查请求做响应。&lt;/p>
-&lt;p>&lt;strong>同步动作&lt;/strong>
-session同步应当时实时的。在以下场景被触发：
-&lt;strong>新建session&lt;/strong>
-发送方：
-session新建完成之后：对于tcp，是握手完毕的；对于udp，是第一条连接。
-接收方：
-接收来自发送方的session，在对应core上新建这条连接，开启老化，老化时间设定为默认时间（1小时）。
-fin/rst
-发送方：
-发送删除session消息
-接收方：
-接收方接收session，做完校验后在对应core上删除session
-&lt;strong>老化&lt;/strong>
-发送方：
-老化时间超时之后，本地session删除，同时发布老化信息，告知其它lb，
-接收方：
-其它lb 做完校验后，开始老化这条session。
-&lt;strong>设备下线&lt;/strong>
-下线后通过控制器更新其他lb的session同步地址信息，不再向该设备同步，同时开始老化全部属于该设备的session。
-&lt;strong>设备上线（包含设备扩容）&lt;/strong>
-新设备：
-新上线设备引流前要接收其他设备的存量session信息，这个功能通过控制器触发完成，控制器感知到新lb上线后通知集群内其他lb向它同步存量session，session数量达到一致时（阿里gw用70%阈值）允许新lb引流。
-旧设备：
-向目的方发送全部的属于自己的session。&lt;/p></description></item><item><title>dpvs 数据流分析</title><link>https://scottlx.github.io/posts/dpvs%E6%95%B0%E6%8D%AE%E6%B5%81%E5%88%86%E6%9E%90/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs%E6%95%B0%E6%8D%AE%E6%B5%81%E5%88%86%E6%9E%90/</guid><description>&lt;h2 id="dpvs-ingress流程分析">dpvs ingress流程分析&lt;/h2>
-&lt;p>从 &lt;em>lcore_job_recv_fwd&lt;/em> 开始，这个是dpvs收取报文的开始&lt;/p>
-&lt;h3 id="设备层">设备层&lt;/h3>
-&lt;p>dev-&amp;gt;flag &amp;amp; NETIF_PORT_FLAG_FORWARD2KNI &amp;mdash;&amp;gt; 则拷贝一份mbuf到kni队列中，这个由命令行和配置文件决定（做流量镜像，用于抓包）&lt;/p>
-&lt;h3 id="eth层">eth层&lt;/h3>
-&lt;p>&lt;em>netif_rcv_mbuf&lt;/em> 这里面涉及到vlan的部分不做过多解析&lt;/p>
-&lt;ul>
-&lt;li>
-&lt;p>不支持的协议&lt;/p>
-&lt;p>目前dpvs支持的协议为ipv4, ipv6, arp。 其它报文类型直接丢给内核。其他类型可以看 
-&lt;a href="https://en.wikipedia.org/wiki/EtherType#cite_note-ethtypes-3" target="_blank" rel="noopener">eth_types&lt;/a>。 
-&lt;a href="#dpvs_kni_ingress">to_kni&lt;/a>&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>RTE_ARP_OP_REPLY&lt;/p>
-&lt;p>复制 &lt;em>nworks-1&lt;/em> 份mbuf，发送到其它worker的arp_ring上 ( &lt;em>&lt;strong>to_other_worker&lt;/strong>&lt;/em> ), 这份报文fwd到
-&lt;a href="#arp%e5%8d%8f%e8%ae%ae">arp协议&lt;/a>.&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>RTE_ARP_OP_REQUEST&lt;/p>
-&lt;p>这份报文fwd到
-&lt;a href="#arp%e5%8d%8f%e8%ae%ae">arp协议&lt;/a>.&lt;/p>
-&lt;/li>
-&lt;/ul>
-&lt;h3 id="arp协议">arp协议&lt;/h3>
-&lt;ul>
-&lt;li>
-&lt;p>arp协议处理 &lt;em>neigh_resolve_input&lt;/em>&lt;/p>
-&lt;ul>
-&lt;li>
-&lt;p>RTE_ARP_OP_REPLY&lt;/p>
-&lt;p>建立邻居表，记录信息，并且把这个报文送给内核。
-&lt;a href="#dpvs_kni_ingress">to_kni&lt;/a>&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>RTE_ARP_OP_REQUEST&lt;/p>
-&lt;p>无条件返回网卡的ip以及mac地址 (&lt;em>free arp&lt;/em>), &lt;em>netif_xmit&lt;/em> 发送到 
-&lt;a href="#dpvs_egress%e6%8a%a5%e6%96%87%e5%88%86%e6%9e%90">core_tx_queue&lt;/a>&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>其它op_code&lt;/p>
-&lt;p>
-&lt;a href="#%e6%8a%a5%e6%96%87drop">drop&lt;/a>&lt;/p>
-&lt;/li>
-&lt;/ul>
-&lt;/li>
-&lt;/ul>
-&lt;h3 id="ip层">ip层&lt;/h3>
-&lt;ul>
-&lt;li>ipv4协议 (ipv6数据流程上一致)
-&lt;ul>
-&lt;li>
-&lt;p>&lt;em>ipv4_rcv&lt;/em>&lt;/p>
-&lt;ul>
-&lt;li>
-&lt;p>ETH_PKT_OTHERHOST&lt;/p>
-&lt;p>报文的dmac不是自己，
-&lt;a href="#%e6%8a%a5%e6%96%87drop">drop&lt;/a>&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>ipv4 协议校验&lt;/p>
-&lt;p>不通过， 
-&lt;a href="#%e6%8a%a5%e6%96%87drop">drop&lt;/a>&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>下一层协议为 IPPROTO_OSPF&lt;/p>
-&lt;p>
-&lt;a href="#dpvs_kni_ingress">to_kni&lt;/a>&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>&lt;em>INET_HOOK_PRE_ROUTING hook&lt;/em>&lt;/p>
-&lt;p>hook_list: &lt;em>dp_vs_in&lt;/em> , &lt;em>dp_vs_prerouting&lt;/em>&lt;/p>
-&lt;p>这两个都与synproxy有关系，但是我们不会启用这个代理，不过需要注意的是syncproxy不通过时会丢包 
-&lt;a href="#%e6%8a%a5%e6%96%87drop">drop&lt;/a>&lt;/p>
-&lt;ul>
-&lt;li>
-&lt;p>dp_vs_in&lt;/p>
-&lt;ul>
-&lt;li>
-&lt;p>非 ETH_PKT_HOST(broadcast 或者 multicast报文)或ip报文交给 &lt;em>ipv4_rcv_fin&lt;/em> 处理&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>非 udp, tcp, icmp, icmp6报文交给 &lt;em>ipv4_rcv_fin&lt;/em> 处理&lt;/p></description></item><item><title>dpdk rcu lib</title><link>https://scottlx.github.io/posts/dpdk-rcu/</link><pubDate>Fri, 08 Dec 2023 17:48:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpdk-rcu/</guid><description>&lt;p>linux的RCU主要针对的数据对象是链表，目的是提高遍历读取数据的效率，为了达到目的使用RCU机制读取数据的时候不对链表进行耗时的加锁操作。这样在同一时间可以有多个线程同时读取该链表，并且允许一个线程对链表进行修改。RCU适用于需要频繁的读取数据，而相应修改数据并不多的情景。&lt;/p>
-&lt;p>dpdk中由于writer和reader同时访问一段内存，删除元素的时候需要确保&lt;/p>
-&lt;ol>
-&lt;li>删除时不会将内存put回allocator，而是删掉这段内存的引用。这样确保了新的访问者不会拿到这个元素的引用，而老的访问者不会在访问过程中core掉&lt;/li>
-&lt;li>只有在元素没有任何引用计数时，才释放掉该元素的内存&lt;/li>
-&lt;/ol>
-&lt;p>静默期是指线程没有持有共享内存的引用的时期，也就是下图绿色的时期&lt;/p>
-&lt;p>&lt;img src="https://doc.dpdk.org/guides/_images/rcu_general_info.svg" alt="rcu">&lt;/p>
-&lt;p>上图中，有三个read thread，T1， T2，T3。两条黑色竖线分别代表writer执行delete和free的时刻。&lt;/p>
-&lt;p>执行delete时，T1和T2还拿着entry1和entry2的reference，此时writer还不能free entry1或entry2的内存，只能删除元素的引用.&lt;/p>
-&lt;p>writer&lt;em>&lt;strong>必须等到执行delete时，当时引用该元素的的线程，都完成了一个静默期之后&lt;/strong>&lt;/em>，才可以free这个内存。&lt;/p>
-&lt;p>writer不需要等T3进入静默期，因为执行delete时，T3还在静默期。&lt;/p>
-&lt;p>如何实现RCU机制&lt;/p>
-&lt;ol>
-&lt;li>writer需要一直轮询reader的状态，看是否进入静默期。这样会导致一直循环轮询，造成额外的cpu消耗。由于需要等reader的静默期结束，reader的静默期越长，reader的数量越多，writer cpu的消耗会越大，因此我们需要短的grace period。但是如果将reader的critical section减小，虽然writer的轮询变快了，但是reader的报告次数增加，reader的cpu消耗会增加，因此我们需要长的critical section。这两者之间看似矛盾。&lt;/li>
-&lt;li>长的critical section：dpdk的lcore一般都是一个while循环。循环的开始和结束必定是静默期。循环的过程中肯定是在访问各种各样的共享内存。因此critical section的粒度可以不要很细，不要每次访问的时候退出静默期，不访问的时候进入静默期，而是将整个循环认为是critical section，只有在循环的开始退出静默期，循环的结束进入静默期。&lt;/li>
-&lt;li>短的grace period：如果是pipeline模型，并不是所有worker都会使用相同的数据结构。话句话说，同一个元素，只会被部分的worker所引用和读取。因此writer不需要等到所有worker的critical section结束，而是使用该元素的worker结束critical section。这样将grace period粒度变小之后，缩短了writer整体的grace period。这种粒度的控制是通过 qsbr 实现的&lt;/li>
-&lt;/ol>
-&lt;h2 id="如何使用rcu库">如何使用rcu库&lt;/h2>
-&lt;p>dpdk-stable-20.11.1/app/test/test_rcu_qsbr.c test_rcu_qsbr_sw_sv_3qs&lt;/p>
-&lt;p>先创建出struct rte_rcu_qsbr&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span> sz &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#268bd2">rte_rcu_qsbr_get_memsize&lt;/span>(RTE_MAX_LCORE);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> rv &lt;span style="color:#719e07">=&lt;/span> (&lt;span style="color:#719e07">struct&lt;/span> rte_rcu_qsbr &lt;span style="color:#719e07">*&lt;/span>)&lt;span style="color:#268bd2">rte_zmalloc&lt;/span>(&lt;span style="color:#b58900">NULL&lt;/span>, sz, RTE_CACHE_LINE_SIZE);
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>再初始化QS variable&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span> &lt;span style="color:#268bd2">rte_rcu_qsbr_init&lt;/span>(rv, RTE_MAX_LCORE);
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>Reader注册自己的线程号，并上线（将自己加到writer的轮询队列里面）
-online时会原子读qsbr里的token，并设置到v-&amp;gt;qsbr_cnt[thread_id].cnt中&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>(&lt;span style="color:#dc322f">void&lt;/span>)&lt;span style="color:#268bd2">rte_rcu_qsbr_thread_register&lt;/span>(rv, lcore_id);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#268bd2">rte_rcu_qsbr_thread_online&lt;/span>(rv, lcore_id);
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>每次读取共享数据后，更新自己的静默状态（rte_rcu_qsbr_quiescent）&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">do&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">for&lt;/span> (i &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#2aa198">0&lt;/span>; i &lt;span style="color:#719e07">&amp;lt;&lt;/span> num_keys; i &lt;span style="color:#719e07">+=&lt;/span> j) {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">for&lt;/span> (j &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#2aa198">0&lt;/span>; j &lt;span style="color:#719e07">&amp;lt;&lt;/span> QSBR_REPORTING_INTERVAL; j&lt;span style="color:#719e07">++&lt;/span>)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#268bd2">rte_hash_lookup&lt;/span>(tbl_rwc_test_param.h,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> keys &lt;span style="color:#719e07">+&lt;/span> i &lt;span style="color:#719e07">+&lt;/span> j);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">/* Update quiescent state counter */&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#268bd2">rte_rcu_qsbr_quiescent&lt;/span>(rv, lcore_id);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> } &lt;span style="color:#719e07">while&lt;/span> (&lt;span style="color:#719e07">!&lt;/span>writer_done);
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>rte_rcu_qsbr_quiescent 是将qsbr-&amp;gt;token更新到自己thread的token里去v-&amp;gt;qsbr_cnt[thread_id].cnt&lt;/p></description></item><item><title>gobpf不完整使用指南</title><link>https://scottlx.github.io/posts/gobpf/</link><pubDate>Mon, 03 Oct 2022 14:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/gobpf/</guid><description>&lt;h3 id="编译过程">编译过程&lt;/h3>
-&lt;h4 id="安装llvm-10clang-10">安装llvm-10,clang-10&lt;/h4>
-&lt;p>apt-install llvm-10 clang-10&lt;/p>
-&lt;h4 id="下载bpf2go">下载bpf2go&lt;/h4>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-shell" data-lang="shell">&lt;span style="display:flex;">&lt;span>go install github.com/cilium/ebpf/cmd/bpf2go@latest
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>修改bpf程序的include&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#include&lt;/span> &lt;span style="color:#719e07">&amp;#34;common.h&amp;#34;&lt;/span>&lt;span style="color:#719e07">
-&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h4 id="编译时将bpd的headers包含进来">编译时将bpd的headers包含进来&lt;/h4>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-shell" data-lang="shell">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#268bd2">GOPACKAGE&lt;/span>&lt;span style="color:#719e07">=&lt;/span>main bpf2go -cc clang-10 -cflags &lt;span style="color:#2aa198">&amp;#39;-O2 -g -Wall -Werror&amp;#39;&lt;/span> -target bpfel,bpfeb bpf helloworld.bpf.c -- -I /root/ebpf/examples/headers
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>得到大端和小端两个版本的ELF文件，之后在go程序里加载即可。cpu一般都是小端。&lt;/p>
-&lt;h3 id="内核版本要求">内核版本要求&lt;/h3>
-&lt;p>经测试一些gobpf的一些syscall不适配较低版本的内核（例如5.8的BPF_LINK_CREATE会报参数错误），建议使用最新版本内核5.19&lt;/p>
-&lt;h3 id="bpf_map">bpf_map&lt;/h3>
-&lt;p>用户态程序首先加载bpf maps，再将bpf maps绑定到fd上。elf文件中的realocation table用来将代码中的bpf maps重定向至正确的fd上,用户程序在fd上发起bpf syscall&lt;/p>
-&lt;p>map的value尽量不要存复合数据结构，若bpf程序和用户态程序共用一个头文件，用户态程序调用bpf.Lookup时由于结构体变量unexported而反射失败&lt;/p>
-&lt;h3 id="pinning-object">pinning object&lt;/h3>
-&lt;p>将map挂载到/sys/fs/bpf&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-go" data-lang="go">&lt;span style="display:flex;">&lt;span>ebpf.CollectionOptions{
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> Maps: ebpf.MapOptions{
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// Pin the map to the BPF filesystem and configure the&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// library to automatically re-write it in the BPF&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// program so it can be re-used if it already exists or&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// create it if not&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> PinPath: pinPath
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>其他用户态程序获取pinned map的fd&lt;/p></description></item><item><title>初识ebpf</title><link>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86ebpf/</link><pubDate>Mon, 03 Oct 2022 14:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86ebpf/</guid><description>&lt;p>摘自&lt;/p>
-&lt;p>
-&lt;a href="https://forsworns.github.io/zh/blogs/20210329/" target="_blank" rel="noopener">eBPF 用户空间虚拟机实现相关 | Blog (forsworns.github.io)&lt;/a>&lt;/p>
-&lt;p>[
-&lt;a href="http://arthurchiao.art/blog/cilium-bpf-xdp-reference-guide-zh/" target="_blank" rel="noopener">译] Cilium：BPF 和 XDP 参考指南（2021） (arthurchiao.art)&lt;/a>&lt;/p>
-&lt;h3 id="hook-point">hook point&lt;/h3>
-&lt;p>可以插入bpf代码的位置&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">enum&lt;/span> bpf_prog_type {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_UNSPEC,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_SOCKET_FILTER,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_KPROBE,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_SCHED_CLS,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_SCHED_ACT,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_TRACEPOINT,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_XDP,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_PERF_EVENT,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_CGROUP_SKB,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_CGROUP_SOCK,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_LWT_IN,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_LWT_OUT,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_LWT_XMIT,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_SOCK_OPS,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_SK_SKB,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>};
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h3 id="程序类型">程序类型&lt;/h3>
-&lt;table>
- &lt;thead>
- &lt;tr>
- &lt;th>&lt;strong>bpf_prog_type&lt;/strong>&lt;/th>
- &lt;th>&lt;strong>BPF prog&lt;/strong> 入口参数（R1)&lt;/th>
- &lt;th>&lt;strong>程序类型&lt;/strong>&lt;/th>
- &lt;/tr>
- &lt;/thead>
- &lt;tbody>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_SOCKET_FILTER&lt;/strong>&lt;/td>
- &lt;td>&lt;strong>struct __sk_buff&lt;/strong>&lt;/td>
- &lt;td>用于过滤进出口网络报文，功能上和 cBPF 类似。&lt;/td>
- &lt;/tr>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_KPROBE&lt;/strong>&lt;/td>
- &lt;td>&lt;strong>struct&lt;/strong> &lt;strong>pt_regs&lt;/strong>&lt;/td>
- &lt;td>用于 kprobe 功能的 BPF 代码。&lt;/td>
- &lt;/tr>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_TRACEPOINT&lt;/strong>&lt;/td>
- &lt;td>这类 BPF 的参数比较特殊，根据 tracepoint 位置的不同而不同。&lt;/td>
- &lt;td>用于在各个 tracepoint 节点运行。&lt;/td>
- &lt;/tr>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_XDP&lt;/strong>&lt;/td>
- &lt;td>&lt;strong>struct&lt;/strong> &lt;strong>xdp_md&lt;/strong>&lt;/td>
- &lt;td>用于控制 XDP(eXtreme Data Path)的 BPF 代码。&lt;/td>
- &lt;/tr>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_PERF_EVENT&lt;/strong>&lt;/td>
- &lt;td>&lt;strong>struct bpf_perf_event_data&lt;/strong>&lt;/td>
- &lt;td>用于定义 perf event 发生时回调的 BPF 代码。&lt;/td>
- &lt;/tr>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_CGROUP_SKB&lt;/strong>&lt;/td>
- &lt;td>&lt;strong>struct __sk_buff&lt;/strong>&lt;/td>
- &lt;td>用于在 network cgroup 中运行的 BPF 代码。功能上和 Socket_Filter 近似。具体用法可以参考范例 test_cgrp2_attach。&lt;/td>
- &lt;/tr>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_CGROUP_SOCK&lt;/strong>&lt;/td>
- &lt;td>&lt;strong>struct bpf_sock&lt;/strong>&lt;/td>
- &lt;td>另一个用于在 network cgroup 中运行的 BPF 代码，范例 test_cgrp2_sock2 中就展示了一个利用 BPF 来控制 host 和 netns 间通信的例子。&lt;/td>
- &lt;/tr>
- &lt;/tbody>
-&lt;/table>
-&lt;p>BPF 程序类型就是由 BPF side 的代码的函数参数确定的，比如写了一个函数，参数是 &lt;code>struct __sk_buff&lt;/code> 类型的，它就是一个 &lt;strong>BPF_PROG_TYPE_SOCKET_FILTER&lt;/strong> 类型的 BPF 程序&lt;/p></description></item></channel></rss>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>高性能网络 on windseek</title><link>https://scottlx.github.io/tags/%E9%AB%98%E6%80%A7%E8%83%BD%E7%BD%91%E7%BB%9C/</link><description>Recent content in 高性能网络 on windseek</description><generator>Hugo -- gohugo.io</generator><language>zh-CN</language><lastBuildDate>Tue, 18 Feb 2025 11:11:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/%E9%AB%98%E6%80%A7%E8%83%BD%E7%BD%91%E7%BB%9C/index.xml" rel="self" type="application/rss+xml"/><item><title>dpvs icmp session</title><link>https://scottlx.github.io/posts/dpvs-icmp/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs-icmp/</guid><description>原生的ipvs仅处理三种类型的ICMP报文：ICMP_DEST_UNREACH、ICMP_SOURCE_QUENCH和ICMP_TIME_EXCEEDED
+对于不是这三种类型的ICMP，则设置为不相关联(related)的ICMP，返回NF_ACCEPT，之后走本机路由流程
+dpvs对ipvs进行了一些修改，修改后逻辑如下
+icmp差错报文流程 __dp_vs_in
+__dp_vs_in_icmp4 （处理icmp差错报文，入参related表示找到了关联的conn）
+若不是ICMP_DEST_UNREACH，ICMP_SOURCE_QUENCH，ICMP_TIME_EXCEEDED，返回到_dp_vs_in走普通conn命中流程
+icmp差错报文，需要将报文头偏移到icmp头内部的ip头，根据内部ip头查找内部ip的conn。
+若找到conn，表明此ICMP报文是由之前客户端的请求报文所触发的，由真实服务器回复的ICMP报文。将related置1
+若未找到则返回accept，返回到_dp_vs_in走普通conn命中流程
+​ __xmit_inbound_icmp4 ​ 找net和local路由，之后走__dp_vs_xmit_icmp4
+__dp_vs_xmit_icmp4 ​ 数据区的前8个字节恰好覆盖了TCP报文或UDP报文中的端口号字段（前四个字节）
+inbound方向根据内部ip的conn修改数据区目的端口为conn-&amp;gt;dport，源端口改为conn-&amp;gt;localport，
+outbound方向将目的端口改为conn-&amp;gt;cport，源端口改为conn-&amp;gt;vport
+​
+client (cport ) &amp;lt;&amp;ndash;&amp;gt; (vport)lb(lport) &amp;lt;&amp;ndash;&amp;gt; rs(dport)
+​ 重新计算icmp头的checksum，走ipv4_output
+实际应用上的问题
+某个rs突然下线，导致有时访问vip轮询到了不可达的rs，rs侧的网关发送了一个dest_unreach的icmp包
+该rs的conn还未老化，__dp_vs_in_icmp4流程根据这个icmp的内部差错ip头找到了还未老化的conn，将icmp数据区的port进行修改发回给client
+但是一般情况，rs下线后，该rs的conn会老化消失，内层conn未命中，还是走外层icmp的conn命中流程转给client。这样内部数据区的端口信息是错的（dport-&amp;gt;lport，正确情况是vport-&amp;gt;cport）
+非差错报文流程 返回_dp_vs_in走普通conn命中流程
+原本dp_vs_conn_new流程中，先查找svc。icmp的svc默认使用端口0进行查找。但是ipvsadm命令却对端口0的service添加做了限制，导致无法添加这类svc。
+svc = dp_vs_service_lookup(iph-&amp;gt;af, iph-&amp;gt;proto, &amp;amp;iph-&amp;gt;daddr, 0, 0, mbuf, NULL, &amp;amp;outwall, rte_lcore_id()); 若未查到走INET_ACCEPT(也就是继续往下进行走到ipv4_output_fin2查到local路由，若使用dpip addr配上了vip或lip地址，则会触发本地代答)。
+若查到svc，则进行conn的schedule，之后会走dp_vs_laddr_bind，但是dp_vs_laddr_bind不支持icmp协议(可以整改)，最终导致svc可以查到但是conn无法建立，最后走INET_DROP。
+概括一下：
+未命中svc，走后续local route，最终本地代答 命中svc后若conn无法建立，drop 命中svc且建立conn，发往rs或client icmp的conn ​
+_ports[0] = icmp4_id(ich); _ports[1] = ich-&amp;gt;type &amp;lt;&amp;lt; 8 | ich-&amp;gt;code; Inbound hash和outboundhash的五元组都使用上述这两个port进行哈希，并与conn进行关联。</description></item><item><title>dpvs route转发</title><link>https://scottlx.github.io/posts/dpvs-route%E8%BD%AC%E5%8F%91/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs-route%E8%BD%AC%E5%8F%91/</guid><description>ipv4_rcv_fin 是路由转发逻辑， INET_HOOKPRE_ROUTING 中走完hook逻辑后，根据dpvs返回值走ipv4_rcv_fin
+路由表结构体 struct route_entry { uint8_t netmask; short metric; uint32_t flag; unsigned long mtu; struct list_head list; struct in_addr dest; //cf-&amp;gt;dst.in struct in_addr gw;// 下一跳地址，0说明是直连路由，下一跳地址就是报文自己的目的地址，对应配置的cf-&amp;gt;via.in struct in_addr src; // cf-&amp;gt;src.in， 源地址策略路由匹配 struct netif_port *port; // 出接口 rte_atomic32_t refcnt; }; 路由类型 /* dpvs defined. */ #define RTF_FORWARD 0x0400 #define RTF_LOCALIN 0x0800 #define RTF_DEFAULT 0x1000 #define RTF_KNI 0X2000 #define RTF_OUTWALL 0x4000 路由表类型 #define this_route_lcore (RTE_PER_LCORE(route_lcore)) #define this_local_route_table (this_route_lcore.local_route_table) #define this_net_route_table (this_route_lcore.</description></item><item><title>dpvs session 同步</title><link>https://scottlx.github.io/posts/dpvs-session%E5%90%8C%E6%AD%A5/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs-session%E5%90%8C%E6%AD%A5/</guid><description>总体架构 lb session同步采用分布式架构，session创建流程触发session数据发送，依次向集群内所有其他节点发送 其他节点收到新的session数据修改本地session表。 session接收和发送各占一个独立线程。
+step1: 向所有其他节点发送session数据 remote session：从别的节点同步来的session
+local session：本节点收到数据包自己生成的session
+step2: session同步至worker 方案一（有锁）： • 独立进程和core处理session同步（per numa） • 每个lcore分配local session和remote session，正常情况下都能直接从local session走掉 • 同步过来的session写到remote session表 • session ip根据fdir走到指定进程
+方案二（无锁）： • 独立进程和core处理session同步消息 • 每个lcore 有来local session和remote session，通过owner属性区分。 • 同步过来的session由session_sync core发消息给对应的slave，由对应的slave进行读写，因此可以做到无锁。 • session ip根据fdir走到指定core
+session同步具体实现 亟待解决的问题： 同步过来的session什么时候老化？
+别的节点上线，本节点要发送哪些session？
+别的节点下线，本节点要删除哪些session？
+是否要响应下线节点的删除/老化请求？
+下线节点怎么知道自己已经下线（数据面）？
+解决方案： 方案一： session增加owner属性c owner属性：
+conn.owner // indicates who has this session session 同步状态转移图
+一条session在一个集群中，应当只有一台机器在使用，所以有一个owner属性，代表这条session被谁拥有，其它所有机器只对这条session的owner发起的增删改查请求做响应。
+同步动作 session同步应当时实时的。在以下场景被触发： 新建session 发送方： session新建完成之后：对于tcp，是握手完毕的；对于udp，是第一条连接。 接收方： 接收来自发送方的session，在对应core上新建这条连接，开启老化，老化时间设定为默认时间（1小时）。 fin/rst 发送方： 发送删除session消息 接收方： 接收方接收session，做完校验后在对应core上删除session 老化 发送方： 老化时间超时之后，本地session删除，同时发布老化信息，告知其它lb， 接收方： 其它lb 做完校验后，开始老化这条session。 设备下线 下线后通过控制器更新其他lb的session同步地址信息，不再向该设备同步，同时开始老化全部属于该设备的session。 设备上线（包含设备扩容） 新设备： 新上线设备引流前要接收其他设备的存量session信息，这个功能通过控制器触发完成，控制器感知到新lb上线后通知集群内其他lb向它同步存量session，session数量达到一致时（阿里gw用70%阈值）允许新lb引流。 旧设备： 向目的方发送全部的属于自己的session。</description></item><item><title>dpvs 数据流分析</title><link>https://scottlx.github.io/posts/dpvs%E6%95%B0%E6%8D%AE%E6%B5%81%E5%88%86%E6%9E%90/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs%E6%95%B0%E6%8D%AE%E6%B5%81%E5%88%86%E6%9E%90/</guid><description>dpvs ingress流程分析 从 lcore_job_recv_fwd 开始，这个是dpvs收取报文的开始
+设备层 dev-&amp;gt;flag &amp;amp; NETIF_PORT_FLAG_FORWARD2KNI &amp;mdash;&amp;gt; 则拷贝一份mbuf到kni队列中，这个由命令行和配置文件决定（做流量镜像，用于抓包）
+eth层 netif_rcv_mbuf 这里面涉及到vlan的部分不做过多解析
+不支持的协议
+目前dpvs支持的协议为ipv4, ipv6, arp。 其它报文类型直接丢给内核。其他类型可以看 eth_types。 to_kni
+RTE_ARP_OP_REPLY
+复制 nworks-1 份mbuf，发送到其它worker的arp_ring上 ( to_other_worker ), 这份报文fwd到 arp协议.
+RTE_ARP_OP_REQUEST
+这份报文fwd到 arp协议.
+arp协议 arp协议处理 neigh_resolve_input
+RTE_ARP_OP_REPLY
+建立邻居表，记录信息，并且把这个报文送给内核。 to_kni
+RTE_ARP_OP_REQUEST
+无条件返回网卡的ip以及mac地址 (free arp), netif_xmit 发送到 core_tx_queue
+其它op_code
+drop
+ip层 ipv4协议 (ipv6数据流程上一致) ipv4_rcv
+ETH_PKT_OTHERHOST
+报文的dmac不是自己， drop
+ipv4 协议校验
+不通过， drop
+下一层协议为 IPPROTO_OSPF
+to_kni
+INET_HOOK_PRE_ROUTING hook
+hook_list: dp_vs_in , dp_vs_prerouting
+这两个都与synproxy有关系，但是我们不会启用这个代理，不过需要注意的是syncproxy不通过时会丢包 drop</description></item><item><title>dpdk rcu lib</title><link>https://scottlx.github.io/posts/dpdk-rcu/</link><pubDate>Fri, 08 Dec 2023 17:48:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpdk-rcu/</guid><description>linux的RCU主要针对的数据对象是链表，目的是提高遍历读取数据的效率，为了达到目的使用RCU机制读取数据的时候不对链表进行耗时的加锁操作。这样在同一时间可以有多个线程同时读取该链表，并且允许一个线程对链表进行修改。RCU适用于需要频繁的读取数据，而相应修改数据并不多的情景。
+dpdk中由于writer和reader同时访问一段内存，删除元素的时候需要确保
+删除时不会将内存put回allocator，而是删掉这段内存的引用。这样确保了新的访问者不会拿到这个元素的引用，而老的访问者不会在访问过程中core掉 只有在元素没有任何引用计数时，才释放掉该元素的内存 静默期是指线程没有持有共享内存的引用的时期，也就是下图绿色的时期
+上图中，有三个read thread，T1， T2，T3。两条黑色竖线分别代表writer执行delete和free的时刻。
+执行delete时，T1和T2还拿着entry1和entry2的reference，此时writer还不能free entry1或entry2的内存，只能删除元素的引用.
+writer必须等到执行delete时，当时引用该元素的的线程，都完成了一个静默期之后，才可以free这个内存。
+writer不需要等T3进入静默期，因为执行delete时，T3还在静默期。
+如何实现RCU机制
+writer需要一直轮询reader的状态，看是否进入静默期。这样会导致一直循环轮询，造成额外的cpu消耗。由于需要等reader的静默期结束，reader的静默期越长，reader的数量越多，writer cpu的消耗会越大，因此我们需要短的grace period。但是如果将reader的critical section减小，虽然writer的轮询变快了，但是reader的报告次数增加，reader的cpu消耗会增加，因此我们需要长的critical section。这两者之间看似矛盾。 长的critical section：dpdk的lcore一般都是一个while循环。循环的开始和结束必定是静默期。循环的过程中肯定是在访问各种各样的共享内存。因此critical section的粒度可以不要很细，不要每次访问的时候退出静默期，不访问的时候进入静默期，而是将整个循环认为是critical section，只有在循环的开始退出静默期，循环的结束进入静默期。 短的grace period：如果是pipeline模型，并不是所有worker都会使用相同的数据结构。话句话说，同一个元素，只会被部分的worker所引用和读取。因此writer不需要等到所有worker的critical section结束，而是使用该元素的worker结束critical section。这样将grace period粒度变小之后，缩短了writer整体的grace period。这种粒度的控制是通过 qsbr 实现的 如何使用rcu库 dpdk-stable-20.11.1/app/test/test_rcu_qsbr.c test_rcu_qsbr_sw_sv_3qs
+先创建出struct rte_rcu_qsbr
+sz = rte_rcu_qsbr_get_memsize(RTE_MAX_LCORE); rv = (struct rte_rcu_qsbr *)rte_zmalloc(NULL, sz, RTE_CACHE_LINE_SIZE); 再初始化QS variable
+rte_rcu_qsbr_init(rv, RTE_MAX_LCORE); Reader注册自己的线程号，并上线（将自己加到writer的轮询队列里面） online时会原子读qsbr里的token，并设置到v-&amp;gt;qsbr_cnt[thread_id].cnt中
+(void)rte_rcu_qsbr_thread_register(rv, lcore_id); rte_rcu_qsbr_thread_online(rv, lcore_id); 每次读取共享数据后，更新自己的静默状态（rte_rcu_qsbr_quiescent）
+do { for (i = 0; i &amp;lt; num_keys; i += j) { for (j = 0; j &amp;lt; QSBR_REPORTING_INTERVAL; j++) rte_hash_lookup(tbl_rwc_test_param.</description></item><item><title>gobpf不完整使用指南</title><link>https://scottlx.github.io/posts/gobpf/</link><pubDate>Mon, 03 Oct 2022 14:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/gobpf/</guid><description>编译过程 安装llvm-10,clang-10 apt-install llvm-10 clang-10
+下载bpf2go go install github.com/cilium/ebpf/cmd/bpf2go@latest 修改bpf程序的include
+#include &amp;#34;common.h&amp;#34; 编译时将bpd的headers包含进来 GOPACKAGE=main bpf2go -cc clang-10 -cflags &amp;#39;-O2 -g -Wall -Werror&amp;#39; -target bpfel,bpfeb bpf helloworld.bpf.c -- -I /root/ebpf/examples/headers 得到大端和小端两个版本的ELF文件，之后在go程序里加载即可。cpu一般都是小端。
+内核版本要求 经测试一些gobpf的一些syscall不适配较低版本的内核（例如5.8的BPF_LINK_CREATE会报参数错误），建议使用最新版本内核5.19
+bpf_map 用户态程序首先加载bpf maps，再将bpf maps绑定到fd上。elf文件中的realocation table用来将代码中的bpf maps重定向至正确的fd上,用户程序在fd上发起bpf syscall
+map的value尽量不要存复合数据结构，若bpf程序和用户态程序共用一个头文件，用户态程序调用bpf.Lookup时由于结构体变量unexported而反射失败
+pinning object 将map挂载到/sys/fs/bpf
+ebpf.CollectionOptions{ Maps: ebpf.MapOptions{ // Pin the map to the BPF filesystem and configure the // library to automatically re-write it in the BPF // program so it can be re-used if it already exists or // create it if not PinPath: pinPath 其他用户态程序获取pinned map的fd</description></item><item><title>初识ebpf</title><link>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86ebpf/</link><pubDate>Mon, 03 Oct 2022 14:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86ebpf/</guid><description>摘自
+eBPF 用户空间虚拟机实现相关 | Blog (forsworns.github.io)
+[ 译] Cilium：BPF 和 XDP 参考指南（2021） (arthurchiao.art)
+hook point 可以插入bpf代码的位置
+enum bpf_prog_type { BPF_PROG_TYPE_UNSPEC, BPF_PROG_TYPE_SOCKET_FILTER, BPF_PROG_TYPE_KPROBE, BPF_PROG_TYPE_SCHED_CLS, BPF_PROG_TYPE_SCHED_ACT, BPF_PROG_TYPE_TRACEPOINT, BPF_PROG_TYPE_XDP, BPF_PROG_TYPE_PERF_EVENT, BPF_PROG_TYPE_CGROUP_SKB, BPF_PROG_TYPE_CGROUP_SOCK, BPF_PROG_TYPE_LWT_IN, BPF_PROG_TYPE_LWT_OUT, BPF_PROG_TYPE_LWT_XMIT, BPF_PROG_TYPE_SOCK_OPS, BPF_PROG_TYPE_SK_SKB, }; 程序类型 bpf_prog_type BPF prog 入口参数（R1) 程序类型 BPF_PROG_TYPE_SOCKET_FILTER struct __sk_buff 用于过滤进出口网络报文，功能上和 cBPF 类似。 BPF_PROG_TYPE_KPROBE struct pt_regs 用于 kprobe 功能的 BPF 代码。 BPF_PROG_TYPE_TRACEPOINT 这类 BPF 的参数比较特殊，根据 tracepoint 位置的不同而不同。 用于在各个 tracepoint 节点运行。 BPF_PROG_TYPE_XDP struct xdp_md 用于控制 XDP(eXtreme Data Path)的 BPF 代码。 BPF_PROG_TYPE_PERF_EVENT struct bpf_perf_event_data 用于定义 perf event 发生时回调的 BPF 代码。 BPF_PROG_TYPE_CGROUP_SKB struct __sk_buff 用于在 network cgroup 中运行的 BPF 代码。功能上和 Socket_Filter 近似。具体用法可以参考范例 test_cgrp2_attach。 BPF_PROG_TYPE_CGROUP_SOCK struct bpf_sock 另一个用于在 network cgroup 中运行的 BPF 代码，范例 test_cgrp2_sock2 中就展示了一个利用 BPF 来控制 host 和 netns 间通信的例子。 BPF 程序类型就是由 BPF side 的代码的函数参数确定的，比如写了一个函数，参数是 struct __sk_buff 类型的，它就是一个 BPF_PROG_TYPE_SOCKET_FILTER 类型的 BPF 程序</description></item></channel></rss>

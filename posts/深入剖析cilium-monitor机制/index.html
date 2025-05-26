@@ -1,0 +1,639 @@
+<!doctype html><html xmlns=http://www.w3.org/1999/xhtml xml:lang=en lang=en-us><head><meta charset=utf-8><meta name=viewport content="width=device-width,minimum-scale=1,maximum-scale=1"><link href=/css/fonts.css rel=stylesheet type=text/css><title>深入剖析cilium monitor机制</title><link rel=stylesheet href=/css/hugo-octopress.css><link rel=stylesheet href=/css/fork-awesome.min.css><link href=https://scottlx.github.io/favicon.png rel=icon><meta name=description content><meta name=keywords content><meta name=author content="windseek"><meta name=generator content="Hugo 0.119.0"></head><body><header role=banner><hgroup><h1><a href=https://scottlx.github.io/>windseek</a></h1><h2>be curious, be free</h2></hgroup></header><nav role=navigation><fieldset class=mobile-nav><select onchange="location=this.value"><option value>Navigate…</option><option value=https://scottlx.github.io/>» Blog</option><option value=https://scottlx.github.io/archives/>» Archives</option><option value=https://scottlx.github.io/cheatsheet/>» CheatSheet</option><option value=https://scottlx.github.io/about/>» Aboutme</option></select></fieldset><ul class=main-navigation><li><a href=https://scottlx.github.io/ title=Blog>Blog</a></li><li><a href=https://scottlx.github.io/archives/ title=Archives target=_blank rel="noopener noreferrer">Archives</a></li><li><a href=https://scottlx.github.io/cheatsheet/ title=CheatSheet target=_blank rel="noopener noreferrer">CheatSheet</a></li><li><a href=https://scottlx.github.io/about/ title=Aboutme target=_blank rel="noopener noreferrer">Aboutme</a></li></ul><ul class=subscription></ul><form action=https://www.google.com/search method=get target=_blank rel="noopener noreferrer"><fieldset role=search><input class=search type=text name=q results=0 placeholder=Search>
+<input type=hidden name=q value=site:https://scottlx.github.io/></fieldset></form></nav><div id=main><div id=content><div><article class=hentry role=article><header><p class=meta>May 26, 2025
+- 10 minute read
+- <a href=https://scottlx.github.io/posts/%E6%B7%B1%E5%85%A5%E5%89%96%E6%9E%90cilium-monitor%E6%9C%BA%E5%88%B6/#disqus_thread>Comments</a>
+- <a class=label href=https://scottlx.github.io/categories/%e6%8a%80%e6%9c%af%e4%bb%8b%e7%bb%8d/>技术介绍</a></p><h1 class=entry-title><a href=https://scottlx.github.io/posts/%E6%B7%B1%E5%85%A5%E5%89%96%E6%9E%90cilium-monitor%E6%9C%BA%E5%88%B6/>深入剖析cilium monitor机制</a></h1></header><div class=entry-content><nav id=TableOfContents><ul><li><ul><li><a href=#可调试性>可调试性</a></li><li><a href=#linux-perf_events>linux perf_events</a></li><li><a href=#perf-buffer>perf buffer</a></li><li><a href=#转发面生成perf>转发面生成perf</a></li><li><a href=#monitor-socket>monitor socket</a></li><li><a href=#monitor样例输出>monitor样例输出</a></li></ul></li></ul></nav><h3 id=可调试性>可调试性</h3><p>报文转发面组件中，可调试性十分关键。开发阶段可能可以使用gdb（ebpf甚至不能用gdb，只能用trace_printk），log等方式进行调试，但到了生产环境，以下几个功能是必须要完备的：</p><ul><li><p>抓包手段</p><ul><li>按照网卡抓包</li><li>按照流进行抓包</li><li>按照特定过滤条件抓包，例如源目的地址，端口，协议号等</li></ul></li><li><p>报文计数</p><ul><li>收发包计数：rx，tx阶段计数</li><li>丢包计数：按照错误码进行区分</li><li>特定观测点计数：一些重要转发函数，例如l3_fwd, arp_response等</li></ul></li><li><p>流日志</p><ul><li>流量方向：egress/ingress</li><li>session信息：五元组，nat信息，tcp状态等</li><li>其他必要的上下文：例如转发表项查找的结果，构造的action，硬件卸载标记等</li></ul></li></ul><h3 id=linux-perf_events>linux perf_events</h3><p><img src=https://developer.qcloudimg.com/http-save/yehe-1566041/85a13978a14744a44856fca6969df9a3.png alt=img></p><p>ebpf perf基于linux perf_event子系统。epbf通知用户态拷贝数据时基于perf_events的</p><h3 id=perf-buffer>perf buffer</h3><p>ebpf中提供了内核和用户空间之间高效地交换数据的机制：perf buffer。它是一种per-cpu的环形缓冲区，当我们需要将ebpf收集到的数据发送到用户空间记录或者处理时，就可以用perf buffer来完成。它还有如下特点：</p><ol><li>能够记录可变长度数据记；</li><li>能够通过内存映射的方式在用户态读取读取数据，而无需通过系统调用陷入到内核去拷贝数据；</li><li>实现epoll通知机制</li></ol><p>因此在cilium中，实现上述调试手段的思路，就是在转发面代码中构造相应的event到<code>EVENTS_MAP</code>，之后通过别的工具去读取并解析<code>EVENTS_MAP</code>中的数据</p><p>EVENTS_MAP定义如下: bpf/lib/events.h</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#719e07>struct</span> {
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>__uint</span>(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>__uint</span>(key_size, <span style=color:#719e07>sizeof</span>(__u32));
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>__uint</span>(value_size, <span style=color:#719e07>sizeof</span>(__u32));
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>__uint</span>(pinning, LIBBPF_PIN_BY_NAME);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>__uint</span>(max_entries, __NR_CPUS__);
+</span></span><span style=display:flex><span>} EVENTS_MAP __section_maps_btf;
+</span></span></code></pre></div><p>key是cpu的编号，因此大小是u32；value一般是文件描述符fd，关联一个perf event，因此也是u32</p><p>数据面代码构造好data之后，使用helper function: <code>bpf_perf_event_output</code>通知用户态代码拷贝数据</p><p>下面是cilium代码中封装好的event输出函数，最终就是调用的bpf_perf_event_output</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#586e75>// bpf/include/bpf/ctx/skb.h
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#719e07>#define ctx_event_output	skb_event_output
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span>
+</span></span><span style=display:flex><span><span style=color:#586e75>// bpf/include/bpf/helpers_skb.h
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#586e75>/* Events for user space */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#dc322f>int</span> <span style=color:#268bd2>BPF_FUNC_REMAP</span>(skb_event_output, <span style=color:#719e07>struct</span> __sk_buff <span style=color:#719e07>*</span>skb, <span style=color:#dc322f>void</span> <span style=color:#719e07>*</span>map,
+</span></span><span style=display:flex><span>			  __u64 index, <span style=color:#719e07>const</span> <span style=color:#dc322f>void</span> <span style=color:#719e07>*</span>data, __u32 size) <span style=color:#719e07>=</span>
+</span></span><span style=display:flex><span>			 (<span style=color:#dc322f>void</span> <span style=color:#719e07>*</span>)BPF_FUNC_perf_event_output; <span style=color:#586e75>//对应的func id 是 25
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>
+</span></span><span style=display:flex><span><span style=color:#586e75>// /usr/include/linux/bpf.h
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#586e75>/* integer value in &#39;imm&#39; field of BPF_CALL instruction selects which helper
+</span></span></span><span style=display:flex><span><span style=color:#586e75> * function eBPF program intends to call
+</span></span></span><span style=display:flex><span><span style=color:#586e75> */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>#define __BPF_ENUM_FN(x) BPF_FUNC_ ## x
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span><span style=color:#719e07>enum</span> bpf_func_id {
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>__BPF_FUNC_MAPPER</span>(__BPF_ENUM_FN)
+</span></span><span style=display:flex><span>	__BPF_FUNC_MAX_ID,
+</span></span><span style=display:flex><span>};
+</span></span><span style=display:flex><span><span style=color:#719e07>#undef __BPF_ENUM_FN
+</span></span></span></code></pre></div><h3 id=转发面生成perf>转发面生成perf</h3><p>debug，drop notify，trace都只是不同的数据格式，最终都是调用<code>ctx_event_output</code>生成event</p><p>数据格式依靠common header的type进行区分</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#586e75>// bpf/lib/common.h
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#719e07>#define NOTIFY_COMMON_HDR \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>	__u8		type;		\
+</span></span></span><span style=display:flex><span><span style=color:#719e07>	__u8		subtype;	\
+</span></span></span><span style=display:flex><span><span style=color:#719e07>	__u16		source;		\
+</span></span></span><span style=display:flex><span><span style=color:#719e07>	__u32		hash;
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span>
+</span></span><span style=display:flex><span><span style=color:#586e75>//type 定义
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#719e07>enum</span> {
+</span></span><span style=display:flex><span>	CILIUM_NOTIFY_UNSPEC,
+</span></span><span style=display:flex><span>	CILIUM_NOTIFY_DROP,
+</span></span><span style=display:flex><span>	CILIUM_NOTIFY_DBG_MSG,
+</span></span><span style=display:flex><span>	CILIUM_NOTIFY_DBG_CAPTURE,
+</span></span><span style=display:flex><span>	CILIUM_NOTIFY_TRACE,
+</span></span><span style=display:flex><span>	CILIUM_NOTIFY_POLICY_VERDICT,
+</span></span><span style=display:flex><span>	CILIUM_NOTIFY_CAPTURE,
+</span></span><span style=display:flex><span>	CILIUM_NOTIFY_TRACE_SOCK,
+</span></span><span style=display:flex><span>};
+</span></span></code></pre></div><p>subtype，source，hash这三个字段，不同的type有各自不同的用法，后面会提到</p><h4 id=debug-日志>Debug 日志</h4><p>debug分两种，</p><ul><li>简单的传参，只传递2个或3个u32到用户态</li><li>带capture的，将整个__ctx_buff 报文带到用户态空间</li></ul><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#586e75>// bpf/lib/dbg.h
+</span></span></span><span style=display:flex><span><span style=color:#586e75>// 只带arg的，common header后直接加data
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#719e07>static</span> __always_inline <span style=color:#dc322f>void</span> <span style=color:#268bd2>cilium_dbg</span>(<span style=color:#719e07>struct</span> __ctx_buff <span style=color:#719e07>*</span>ctx, __u8 type,
+</span></span><span style=display:flex><span>				       __u32 arg1, __u32 arg2)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> debug_msg msg <span style=color:#719e07>=</span> {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>__notify_common_hdr</span>(CILIUM_NOTIFY_DBG_MSG, type),
+</span></span><span style=display:flex><span>		.arg1	<span style=color:#719e07>=</span> arg1,
+</span></span><span style=display:flex><span>		.arg2	<span style=color:#719e07>=</span> arg2,
+</span></span><span style=display:flex><span>	};
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>ctx_event_output</span>(ctx, <span style=color:#719e07>&amp;</span>EVENTS_MAP, BPF_F_CURRENT_CPU,
+</span></span><span style=display:flex><span>			 <span style=color:#719e07>&amp;</span>msg, <span style=color:#719e07>sizeof</span>(msg));
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#586e75>// 带capture的，common header后带了pktcap_hdr，指定原包长和抓包的包长
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#719e07>static</span> __always_inline <span style=color:#dc322f>void</span> <span style=color:#268bd2>cilium_dbg_capture2</span>(<span style=color:#719e07>struct</span> __ctx_buff <span style=color:#719e07>*</span>ctx, __u8 type,
+</span></span><span style=display:flex><span>						__u32 arg1, __u32 arg2)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	__u64 ctx_len <span style=color:#719e07>=</span> <span style=color:#268bd2>ctx_full_len</span>(ctx);
+</span></span><span style=display:flex><span>	__u64 cap_len <span style=color:#719e07>=</span> <span style=color:#dc322f>min_t</span>(__u64, TRACE_PAYLOAD_LEN, ctx_len);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> debug_capture_msg msg <span style=color:#719e07>=</span> {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>__notify_common_hdr</span>(CILIUM_NOTIFY_DBG_CAPTURE, type),
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>__notify_pktcap_hdr</span>((__u32)ctx_len, (__u16)cap_len, NOTIFY_CAPTURE_VER),
+</span></span><span style=display:flex><span>		.arg1	<span style=color:#719e07>=</span> arg1,
+</span></span><span style=display:flex><span>		.arg2	<span style=color:#719e07>=</span> arg2,
+</span></span><span style=display:flex><span>	};
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>ctx_event_output</span>(ctx, <span style=color:#719e07>&amp;</span>EVENTS_MAP,
+</span></span><span style=display:flex><span>			 (cap_len <span style=color:#719e07>&lt;&lt;</span> <span style=color:#2aa198>32</span>) <span style=color:#719e07>|</span> BPF_F_CURRENT_CPU,
+</span></span><span style=display:flex><span>			 <span style=color:#719e07>&amp;</span>msg, <span style=color:#719e07>sizeof</span>(msg));
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p>其中type（common_header中的subtype）定义了用户态代码在解析时的输出格式，由monitor进行格式化输出</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span><span style=color:#586e75>// pkg/monitor/datapath_debug.go
+</span></span></span><span style=display:flex><span><span style=color:#586e75>// Message returns the debug message in a human-readable format
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#268bd2>func</span> (n <span style=color:#719e07>*</span>DebugMsg) <span style=color:#268bd2>Message</span>(linkMonitor getters.LinkGetter) <span style=color:#dc322f>string</span> {
+</span></span><span style=display:flex><span>	<span style=color:#719e07>switch</span> n.SubType {
+</span></span><span style=display:flex><span>	<span style=color:#719e07>case</span> DbgGeneric:
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> fmt.<span style=color:#268bd2>Sprintf</span>(<span style=color:#2aa198>&#34;No message, arg1=%d (%#x) arg2=%d (%#x)&#34;</span>, n.Arg1, n.Arg1, n.Arg2, n.Arg2)
+</span></span><span style=display:flex><span>	<span style=color:#719e07>case</span> DbgLocalDelivery:
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> fmt.<span style=color:#268bd2>Sprintf</span>(<span style=color:#2aa198>&#34;Attempting local delivery for container id %d from seclabel %d&#34;</span>, n.Arg1, n.Arg2)
+</span></span><span style=display:flex><span>	<span style=color:#719e07>case</span> DbgEncap:
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> fmt.<span style=color:#268bd2>Sprintf</span>(<span style=color:#2aa198>&#34;Encapsulating to node %d (%#x) from seclabel %d&#34;</span>, n.Arg1, n.Arg1, n.Arg2)
+</span></span><span style=display:flex><span>	<span style=color:#719e07>case</span> DbgLxcFound:
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>var</span> ifname <span style=color:#dc322f>string</span>
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> linkMonitor <span style=color:#719e07>!=</span> <span style=color:#cb4b16>nil</span> {
+</span></span><span style=display:flex><span>			ifname = linkMonitor.<span style=color:#268bd2>Name</span>(n.Arg1)
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> fmt.<span style=color:#268bd2>Sprintf</span>(<span style=color:#2aa198>&#34;Local container found ifindex %s seclabel %d&#34;</span>, ifname, byteorder.<span style=color:#268bd2>NetworkToHost16</span>(<span style=color:#b58900>uint16</span>(n.Arg2)))
+</span></span><span style=display:flex><span>	<span style=color:#719e07>case</span> DbgPolicyDenied:
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> fmt.<span style=color:#268bd2>Sprintf</span>(<span style=color:#2aa198>&#34;Policy evaluation would deny packet from %d to %d&#34;</span>, n.Arg1, n.Arg2)
+</span></span><span style=display:flex><span>	<span style=color:#719e07>case</span> DbgCtLookup:
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> fmt.<span style=color:#268bd2>Sprintf</span>(<span style=color:#2aa198>&#34;CT lookup: %s&#34;</span>, <span style=color:#268bd2>ctInfo</span>(n.Arg1, n.Arg2))
+</span></span><span style=display:flex><span>	<span style=color:#719e07>case</span> DbgCtLookupRev:
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> fmt.<span style=color:#268bd2>Sprintf</span>(<span style=color:#2aa198>&#34;CT reverse lookup: %s&#34;</span>, <span style=color:#268bd2>ctInfo</span>(n.Arg1, n.Arg2))
+</span></span><span style=display:flex><span>	<span style=color:#719e07>case</span> DbgCtLookup4:
+</span></span><span style=display:flex><span>        <span style=color:#586e75>// ...
+</span></span></span></code></pre></div><h4 id=drop-notification>Drop notification</h4><p>drop notification是一种带了更多信息的debug capture，数据格式如下</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#586e75>// bpf/lib/drop.h
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#719e07>struct</span> drop_notify {
+</span></span><span style=display:flex><span>	NOTIFY_CAPTURE_HDR
+</span></span><span style=display:flex><span>	__u32		src_label; <span style=color:#586e75>/* identifaction labels */</span>
+</span></span><span style=display:flex><span>	__u32		dst_label;
+</span></span><span style=display:flex><span>	__u32		dst_id; <span style=color:#586e75>/* 0 for egress */</span>
+</span></span><span style=display:flex><span>	__u16		line;  <span style=color:#586e75>/* 发生丢包的代码行 */</span>
+</span></span><span style=display:flex><span>	__u8		file;  <span style=color:#586e75>/* 发生丢包的文件名 */</span>
+</span></span><span style=display:flex><span>	__s8		ext_error; <span style=color:#586e75>/* 扩展错误码 */</span>
+</span></span><span style=display:flex><span>	__u32		ifindex;  <span style=color:#586e75>/* 丢包网卡 */</span>
+</span></span><span style=display:flex><span>};
+</span></span></code></pre></div><p>文件名和代码行是编译器内置宏输出的</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#586e75>// bpf/lib/source_info.h
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>
+</span></span><span style=display:flex><span><span style=color:#719e07>#define __MAGIC_FILE__ (__u8)__id_for_file(__FILE_NAME__)
+</span></span></span><span style=display:flex><span><span style=color:#719e07>#define __MAGIC_LINE__ __LINE__
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span>
+</span></span><span style=display:flex><span><span style=color:#719e07>#define _strcase_(id, known_name) do {			\
+</span></span></span><span style=display:flex><span><span style=color:#719e07>	if (!__builtin_strcmp(header_name, known_name))	\
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		return id;				\
+</span></span></span><span style=display:flex><span><span style=color:#719e07>	} while (0)
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span>
+</span></span><span style=display:flex><span><span style=color:#586e75>/*
+</span></span></span><span style=display:flex><span><span style=color:#586e75> * __id_for_file is used by __MAGIC_FILE__ to encode source file information in
+</span></span></span><span style=display:flex><span><span style=color:#586e75> * drop notifications and forward/drop metrics. It must be inlined, otherwise
+</span></span></span><span style=display:flex><span><span style=color:#586e75> * clang won&#39;t translate this to a constexpr.
+</span></span></span><span style=display:flex><span><span style=color:#586e75> *
+</span></span></span><span style=display:flex><span><span style=color:#586e75> * The following list of files is static, but it is validated during build with
+</span></span></span><span style=display:flex><span><span style=color:#586e75> * the pkg/datapath/loader/check-sources.sh tool.
+</span></span></span><span style=display:flex><span><span style=color:#586e75> */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> __always_inline <span style=color:#dc322f>int</span>
+</span></span><span style=display:flex><span><span style=color:#268bd2>__id_for_file</span>(<span style=color:#719e07>const</span> <span style=color:#dc322f>char</span> <span style=color:#719e07>*</span><span style=color:#719e07>const</span> header_name)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#586e75>/* @@ source files list begin */</span>
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#586e75>/* source files from bpf/ */</span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>1</span>, <span style=color:#2aa198>&#34;bpf_host.c&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>2</span>, <span style=color:#2aa198>&#34;bpf_lxc.c&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>3</span>, <span style=color:#2aa198>&#34;bpf_overlay.c&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>4</span>, <span style=color:#2aa198>&#34;bpf_xdp.c&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>5</span>, <span style=color:#2aa198>&#34;bpf_sock.c&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>6</span>, <span style=color:#2aa198>&#34;bpf_network.c&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>7</span>, <span style=color:#2aa198>&#34;bpf_wireguard.c&#34;</span>);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#586e75>/* header files from bpf/lib/ */</span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>101</span>, <span style=color:#2aa198>&#34;arp.h&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>102</span>, <span style=color:#2aa198>&#34;drop.h&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>103</span>, <span style=color:#2aa198>&#34;srv6.h&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>104</span>, <span style=color:#2aa198>&#34;icmp6.h&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>105</span>, <span style=color:#2aa198>&#34;nodeport.h&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>106</span>, <span style=color:#2aa198>&#34;lb.h&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>107</span>, <span style=color:#2aa198>&#34;mcast.h&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>108</span>, <span style=color:#2aa198>&#34;ipv4.h&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>109</span>, <span style=color:#2aa198>&#34;conntrack.h&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>110</span>, <span style=color:#2aa198>&#34;l3.h&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>111</span>, <span style=color:#2aa198>&#34;trace.h&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>112</span>, <span style=color:#2aa198>&#34;encap.h&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>113</span>, <span style=color:#2aa198>&#34;encrypt.h&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>114</span>, <span style=color:#2aa198>&#34;host_firewall.h&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_strcase_</span>(<span style=color:#2aa198>115</span>, <span style=color:#2aa198>&#34;nodeport_egress.h&#34;</span>);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#586e75>/* @@ source files list end */</span>
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p>用户态解析时，文件编号需要对应上，可以通过<code>contrib/scripts/check-source-info.sh</code>这个脚本来确保两个文件是对应上的</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span><span style=color:#586e75>// pkg/monitor/api/files.go
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>
+</span></span><span style=display:flex><span><span style=color:#586e75>// Keep in sync with __id_for_file in bpf/lib/source_info.h.
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#268bd2>var</span> files = <span style=color:#268bd2>map</span>[<span style=color:#dc322f>uint8</span>]<span style=color:#dc322f>string</span>{
+</span></span><span style=display:flex><span>	<span style=color:#586e75>// @@ source files list begin
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>
+</span></span><span style=display:flex><span>	<span style=color:#586e75>// source files from bpf/
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	<span style=color:#2aa198>1</span>: <span style=color:#2aa198>&#34;bpf_host.c&#34;</span>,
+</span></span><span style=display:flex><span>	<span style=color:#2aa198>2</span>: <span style=color:#2aa198>&#34;bpf_lxc.c&#34;</span>,
+</span></span><span style=display:flex><span>	<span style=color:#2aa198>3</span>: <span style=color:#2aa198>&#34;bpf_overlay.c&#34;</span>,
+</span></span><span style=display:flex><span>	<span style=color:#2aa198>4</span>: <span style=color:#2aa198>&#34;bpf_xdp.c&#34;</span>,
+</span></span><span style=display:flex><span>	<span style=color:#2aa198>5</span>: <span style=color:#2aa198>&#34;bpf_sock.c&#34;</span>,
+</span></span><span style=display:flex><span>	<span style=color:#2aa198>6</span>: <span style=color:#2aa198>&#34;bpf_network.c&#34;</span>,
+</span></span><span style=display:flex><span>	<span style=color:#2aa198>7</span>: <span style=color:#2aa198>&#34;bpf_wireguard.c&#34;</span>,
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#586e75>// header files from bpf/lib/
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	<span style=color:#2aa198>101</span>: <span style=color:#2aa198>&#34;arp.h&#34;</span>,
+</span></span><span style=display:flex><span>	<span style=color:#2aa198>102</span>: <span style=color:#2aa198>&#34;drop.h&#34;</span>,
+</span></span><span style=display:flex><span>	<span style=color:#2aa198>103</span>: <span style=color:#2aa198>&#34;srv6.h&#34;</span>,
+</span></span><span style=display:flex><span>	<span style=color:#2aa198>104</span>: <span style=color:#2aa198>&#34;icmp6.h&#34;</span>,
+</span></span><span style=display:flex><span>	<span style=color:#2aa198>105</span>: <span style=color:#2aa198>&#34;nodeport.h&#34;</span>,
+</span></span><span style=display:flex><span>	<span style=color:#2aa198>106</span>: <span style=color:#2aa198>&#34;lb.h&#34;</span>,
+</span></span><span style=display:flex><span>	<span style=color:#2aa198>107</span>: <span style=color:#2aa198>&#34;mcast.h&#34;</span>,
+</span></span><span style=display:flex><span>	<span style=color:#2aa198>108</span>: <span style=color:#2aa198>&#34;ipv4.h&#34;</span>,
+</span></span><span style=display:flex><span>	<span style=color:#2aa198>109</span>: <span style=color:#2aa198>&#34;conntrack.h&#34;</span>,
+</span></span><span style=display:flex><span>	<span style=color:#2aa198>110</span>: <span style=color:#2aa198>&#34;l3.h&#34;</span>,
+</span></span><span style=display:flex><span>	<span style=color:#2aa198>111</span>: <span style=color:#2aa198>&#34;trace.h&#34;</span>,
+</span></span><span style=display:flex><span>	<span style=color:#2aa198>112</span>: <span style=color:#2aa198>&#34;encap.h&#34;</span>,
+</span></span><span style=display:flex><span>	<span style=color:#2aa198>113</span>: <span style=color:#2aa198>&#34;encrypt.h&#34;</span>,
+</span></span><span style=display:flex><span>	<span style=color:#2aa198>114</span>: <span style=color:#2aa198>&#34;host_firewall.h&#34;</span>,
+</span></span><span style=display:flex><span>	<span style=color:#2aa198>115</span>: <span style=color:#2aa198>&#34;nodeport_egress.h&#34;</span>,
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#586e75>// @@ source files list end
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#586e75>// BPFFileName returns the file name for the given BPF file id.
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#268bd2>func</span> <span style=color:#268bd2>BPFFileName</span>(id <span style=color:#dc322f>uint8</span>) <span style=color:#dc322f>string</span> {
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> name, ok <span style=color:#719e07>:=</span> files[id]; ok {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> name
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> fmt.<span style=color:#268bd2>Sprintf</span>(<span style=color:#2aa198>&#34;unknown(%d)&#34;</span>, id)
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p>相同的，<code>bpf/lib/common.h</code>和<code>pkg/monitor/api/drop.go</code>的错误码也要对应上</p><h4 id=trace>trace</h4><p>数据格式如下</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#719e07>struct</span> trace_notify {
+</span></span><span style=display:flex><span>	NOTIFY_CAPTURE_HDR
+</span></span><span style=display:flex><span>	__u32		src_label;
+</span></span><span style=display:flex><span>	__u32		dst_label;
+</span></span><span style=display:flex><span>	__u16		dst_id;
+</span></span><span style=display:flex><span>	__u8		reason;
+</span></span><span style=display:flex><span>	__u8		ipv6:<span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>	__u8		pad:<span style=color:#2aa198>7</span>;
+</span></span><span style=display:flex><span>	__u32		ifindex;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>union</span> {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>struct</span> {
+</span></span><span style=display:flex><span>			__be32		orig_ip4;
+</span></span><span style=display:flex><span>			__u32		orig_pad1;
+</span></span><span style=display:flex><span>			__u32		orig_pad2;
+</span></span><span style=display:flex><span>			__u32		orig_pad3;
+</span></span><span style=display:flex><span>		};
+</span></span><span style=display:flex><span>		<span style=color:#719e07>union</span> v6addr	orig_ip6;
+</span></span><span style=display:flex><span>	};
+</span></span><span style=display:flex><span>};
+</span></span></code></pre></div><p>转发reason有以下几种，与conntrack状态强相关</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#586e75>// bpf/lib/trace.h
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#586e75>/* Reasons for forwarding a packet, keep in sync with pkg/monitor/datapath_trace.go */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>enum</span> trace_reason {
+</span></span><span style=display:flex><span>	TRACE_REASON_POLICY <span style=color:#719e07>=</span> CT_NEW,
+</span></span><span style=display:flex><span>	TRACE_REASON_CT_ESTABLISHED <span style=color:#719e07>=</span> CT_ESTABLISHED,
+</span></span><span style=display:flex><span>	TRACE_REASON_CT_REPLY <span style=color:#719e07>=</span> CT_REPLY,
+</span></span><span style=display:flex><span>	TRACE_REASON_CT_RELATED <span style=color:#719e07>=</span> CT_RELATED,
+</span></span><span style=display:flex><span>	TRACE_REASON_RESERVED,
+</span></span><span style=display:flex><span>	TRACE_REASON_UNKNOWN,
+</span></span><span style=display:flex><span>	TRACE_REASON_SRV6_ENCAP,
+</span></span><span style=display:flex><span>	TRACE_REASON_SRV6_DECAP,
+</span></span><span style=display:flex><span>	TRACE_REASON_ENCRYPT_OVERLAY,
+</span></span><span style=display:flex><span>	<span style=color:#586e75>/* Note: TRACE_REASON_ENCRYPTED is used as a mask. Beware if you add
+</span></span></span><span style=display:flex><span><span style=color:#586e75>	 * new values below it, they would match with that mask.
+</span></span></span><span style=display:flex><span><span style=color:#586e75>	 */</span>
+</span></span><span style=display:flex><span>	TRACE_REASON_ENCRYPTED <span style=color:#719e07>=</span> <span style=color:#2aa198>0x80</span>,
+</span></span><span style=display:flex><span>} __packed;
+</span></span></code></pre></div><p>观测点</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#586e75>// bpf/lib/trace.h
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#719e07>enum</span> trace_point {
+</span></span><span style=display:flex><span>	TRACE_TO_LXC,
+</span></span><span style=display:flex><span>	TRACE_TO_PROXY,
+</span></span><span style=display:flex><span>	TRACE_TO_HOST,
+</span></span><span style=display:flex><span>	TRACE_TO_STACK,
+</span></span><span style=display:flex><span>	TRACE_TO_OVERLAY,
+</span></span><span style=display:flex><span>	TRACE_FROM_LXC,
+</span></span><span style=display:flex><span>	TRACE_FROM_PROXY,
+</span></span><span style=display:flex><span>	TRACE_FROM_HOST,
+</span></span><span style=display:flex><span>	TRACE_FROM_STACK,
+</span></span><span style=display:flex><span>	TRACE_FROM_OVERLAY,
+</span></span><span style=display:flex><span>	TRACE_FROM_NETWORK,
+</span></span><span style=display:flex><span>	TRACE_TO_NETWORK,
+</span></span><span style=display:flex><span>} __packed;
+</span></span></code></pre></div><p>trace的观测点是保存在common header的subtype字段，代码如下</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#719e07>#define send_trace_notify(ctx, obs_point, src, dst, dst_id, ifindex, reason, monitor) \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		_send_trace_notify(ctx, obs_point, src, dst, dst_id, ifindex, reason, monitor, \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		__MAGIC_LINE__, __MAGIC_FILE__)
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span><span style=color:#719e07>static</span> __always_inline <span style=color:#dc322f>void</span>
+</span></span><span style=display:flex><span><span style=color:#268bd2>_send_trace_notify</span>(<span style=color:#719e07>struct</span> __ctx_buff <span style=color:#719e07>*</span>ctx, <span style=color:#719e07>enum</span> trace_point obs_point,
+</span></span><span style=display:flex><span>		   __u32 src, __u32 dst, __u16 dst_id, __u32 ifindex,
+</span></span><span style=display:flex><span>		   <span style=color:#719e07>enum</span> trace_reason reason, __u32 monitor, __u16 line, __u8 file)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	__u64 ctx_len <span style=color:#719e07>=</span> <span style=color:#268bd2>ctx_full_len</span>(ctx);
+</span></span><span style=display:flex><span>	__u64 cap_len <span style=color:#719e07>=</span> <span style=color:#dc322f>min_t</span>(__u64, monitor <span style=color:#719e07>?</span> <span style=color:#719e07>:</span> TRACE_PAYLOAD_LEN,
+</span></span><span style=display:flex><span>			      ctx_len);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> ratelimit_key rkey <span style=color:#719e07>=</span> {
+</span></span><span style=display:flex><span>		.usage <span style=color:#719e07>=</span> RATELIMIT_USAGE_EVENTS_MAP,
+</span></span><span style=display:flex><span>	};
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> ratelimit_settings settings <span style=color:#719e07>=</span> {
+</span></span><span style=display:flex><span>		.topup_interval_ns <span style=color:#719e07>=</span> NSEC_PER_SEC,
+</span></span><span style=display:flex><span>	};
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> trace_notify msg __align_stack_8;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>_update_trace_metrics</span>(ctx, obs_point, reason, line, file); <span style=color:#586e75>// 更新metrics计数
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span><span style=color:#268bd2>emit_trace_notify</span>(obs_point, monitor))
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (EVENTS_MAP_RATE_LIMIT <span style=color:#719e07>&gt;</span> <span style=color:#2aa198>0</span>) {  <span style=color:#586e75>// 防止报文过多打爆ring环
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>		settings.bucket_size <span style=color:#719e07>=</span> EVENTS_MAP_BURST_LIMIT;
+</span></span><span style=display:flex><span>		settings.tokens_per_topup <span style=color:#719e07>=</span> EVENTS_MAP_RATE_LIMIT;
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span><span style=color:#268bd2>ratelimit_check_and_take</span>(<span style=color:#719e07>&amp;</span>rkey, <span style=color:#719e07>&amp;</span>settings))
+</span></span><span style=display:flex><span>			<span style=color:#719e07>return</span>;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	msg <span style=color:#719e07>=</span> (<span style=color:#268bd2>typeof</span>(msg)) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>__notify_common_hdr</span>(CILIUM_NOTIFY_TRACE, obs_point), <span style=color:#586e75>// subtype是obs_point
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>		<span style=color:#268bd2>__notify_pktcap_hdr</span>((__u32)ctx_len, (__u16)cap_len, NOTIFY_CAPTURE_VER),
+</span></span><span style=display:flex><span>		.src_label	<span style=color:#719e07>=</span> src,
+</span></span><span style=display:flex><span>		.dst_label	<span style=color:#719e07>=</span> dst,
+</span></span><span style=display:flex><span>		.dst_id		<span style=color:#719e07>=</span> dst_id,
+</span></span><span style=display:flex><span>		.reason		<span style=color:#719e07>=</span> reason,
+</span></span><span style=display:flex><span>		.ifindex	<span style=color:#719e07>=</span> ifindex,
+</span></span><span style=display:flex><span>	};
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>memset</span>(<span style=color:#719e07>&amp;</span>msg.orig_ip6, <span style=color:#2aa198>0</span>, <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>union</span> v6addr));
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>ctx_event_output</span>(ctx, <span style=color:#719e07>&amp;</span>EVENTS_MAP,
+</span></span><span style=display:flex><span>			 (cap_len <span style=color:#719e07>&lt;&lt;</span> <span style=color:#2aa198>32</span>) <span style=color:#719e07>|</span> BPF_F_CURRENT_CPU,
+</span></span><span style=display:flex><span>			 <span style=color:#719e07>&amp;</span>msg, <span style=color:#719e07>sizeof</span>(msg));
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><h3 id=monitor-socket>monitor socket</h3><p>cilium daemon启动时，会启动monitor-agent，读取perf event ring并提供api给cilium-dbg工具或envoy进行连接</p><p>![cilium event](/img/cilium event.png)</p><h4 id=agent组件>agent组件</h4><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span><span style=color:#586e75>// pkg/monitor/agent/agent.go
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#268bd2>type</span> agent <span style=color:#268bd2>struct</span> {
+</span></span><span style=display:flex><span>	lock.Mutex
+</span></span><span style=display:flex><span>	models.MonitorStatus
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	ctx              context.Context
+</span></span><span style=display:flex><span>	perfReaderCancel context.CancelFunc
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#586e75>// listeners are external cilium monitor clients which receive raw
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	<span style=color:#586e75>// gob-encoded payloads
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	listeners <span style=color:#268bd2>map</span>[listener.MonitorListener]<span style=color:#268bd2>struct</span>{}
+</span></span><span style=display:flex><span>	<span style=color:#586e75>// consumers are internal clients which receive decoded messages
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	consumers <span style=color:#268bd2>map</span>[consumer.MonitorConsumer]<span style=color:#268bd2>struct</span>{}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	events        <span style=color:#719e07>*</span>ebpf.Map
+</span></span><span style=display:flex><span>	monitorEvents <span style=color:#719e07>*</span>perf.Reader
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><h4 id=读取perf-ring流程>读取perf ring流程</h4><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span><span style=color:#268bd2>func</span> (a <span style=color:#719e07>*</span>agent) <span style=color:#268bd2>handleEvents</span>(stopCtx context.Context) {
+</span></span><span style=display:flex><span>	scopedLog <span style=color:#719e07>:=</span> log.<span style=color:#268bd2>WithField</span>(logfields.StartTime, time.<span style=color:#268bd2>Now</span>())
+</span></span><span style=display:flex><span>	scopedLog.<span style=color:#268bd2>Info</span>(<span style=color:#2aa198>&#34;Beginning to read perf buffer&#34;</span>)
+</span></span><span style=display:flex><span>	<span style=color:#719e07>defer</span> scopedLog.<span style=color:#268bd2>Info</span>(<span style=color:#2aa198>&#34;Stopped reading perf buffer&#34;</span>)
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	bufferSize <span style=color:#719e07>:=</span> <span style=color:#b58900>int</span>(a.Pagesize <span style=color:#719e07>*</span> a.Npages)
+</span></span><span style=display:flex><span>	monitorEvents, err <span style=color:#719e07>:=</span> perf.<span style=color:#268bd2>NewReader</span>(a.events, bufferSize) <span style=color:#586e75>//初始化reader
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	<span style=color:#719e07>if</span> err <span style=color:#719e07>!=</span> <span style=color:#cb4b16>nil</span> {
+</span></span><span style=display:flex><span>		scopedLog.<span style=color:#268bd2>WithError</span>(err).<span style=color:#268bd2>Fatal</span>(<span style=color:#2aa198>&#34;Cannot initialise BPF perf ring buffer sockets&#34;</span>)
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>	<span style=color:#719e07>defer</span> <span style=color:#268bd2>func</span>() {
+</span></span><span style=display:flex><span>		monitorEvents.<span style=color:#268bd2>Close</span>()
+</span></span><span style=display:flex><span>		a.<span style=color:#268bd2>Lock</span>()
+</span></span><span style=display:flex><span>		a.monitorEvents = <span style=color:#cb4b16>nil</span>
+</span></span><span style=display:flex><span>		a.<span style=color:#268bd2>Unlock</span>()
+</span></span><span style=display:flex><span>	}()
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	a.<span style=color:#268bd2>Lock</span>()
+</span></span><span style=display:flex><span>	a.monitorEvents = monitorEvents
+</span></span><span style=display:flex><span>	a.<span style=color:#268bd2>Unlock</span>()
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>for</span> !<span style=color:#268bd2>isCtxDone</span>(stopCtx) {
+</span></span><span style=display:flex><span>		record, err <span style=color:#719e07>:=</span> monitorEvents.<span style=color:#268bd2>Read</span>()
+</span></span><span style=display:flex><span>		<span style=color:#719e07>switch</span> {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>case</span> <span style=color:#268bd2>isCtxDone</span>(stopCtx):
+</span></span><span style=display:flex><span>			<span style=color:#719e07>return</span>
+</span></span><span style=display:flex><span>		<span style=color:#719e07>case</span> err <span style=color:#719e07>!=</span> <span style=color:#cb4b16>nil</span>:
+</span></span><span style=display:flex><span>			<span style=color:#719e07>if</span> perf.<span style=color:#268bd2>IsUnknownEvent</span>(err) {
+</span></span><span style=display:flex><span>				a.<span style=color:#268bd2>Lock</span>()
+</span></span><span style=display:flex><span>				a.MonitorStatus.Unknown<span style=color:#719e07>++</span>
+</span></span><span style=display:flex><span>				a.<span style=color:#268bd2>Unlock</span>()
+</span></span><span style=display:flex><span>			} <span style=color:#719e07>else</span> {
+</span></span><span style=display:flex><span>				scopedLog.<span style=color:#268bd2>WithError</span>(err).<span style=color:#268bd2>Warn</span>(<span style=color:#2aa198>&#34;Error received while reading from perf buffer&#34;</span>)
+</span></span><span style=display:flex><span>				<span style=color:#719e07>if</span> errors.<span style=color:#268bd2>Is</span>(err, unix.EBADFD) {
+</span></span><span style=display:flex><span>					<span style=color:#719e07>return</span>
+</span></span><span style=display:flex><span>				}
+</span></span><span style=display:flex><span>			}
+</span></span><span style=display:flex><span>			<span style=color:#719e07>continue</span>
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>		a.<span style=color:#268bd2>processPerfRecord</span>(scopedLog, record) <span style=color:#586e75>// 解析每个event
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	}
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span><span style=color:#586e75>// processPerfRecord processes a record from the datapath and sends it to any
+</span></span></span><span style=display:flex><span><span style=color:#586e75>// registered subscribers
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#268bd2>func</span> (a <span style=color:#719e07>*</span>agent) <span style=color:#268bd2>processPerfRecord</span>(scopedLog <span style=color:#719e07>*</span>logrus.Entry, record perf.Record) {
+</span></span><span style=display:flex><span>	a.<span style=color:#268bd2>Lock</span>()
+</span></span><span style=display:flex><span>	<span style=color:#719e07>defer</span> a.<span style=color:#268bd2>Unlock</span>()
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> record.LostSamples &gt; <span style=color:#2aa198>0</span> {
+</span></span><span style=display:flex><span>		a.MonitorStatus.Lost <span style=color:#719e07>+=</span> <span style=color:#b58900>int64</span>(record.LostSamples)
+</span></span><span style=display:flex><span>		a.<span style=color:#268bd2>notifyPerfEventLostLocked</span>(record.LostSamples, record.CPU)
+</span></span><span style=display:flex><span>		a.<span style=color:#268bd2>sendToListenersLocked</span>(<span style=color:#719e07>&amp;</span>payload.Payload{
+</span></span><span style=display:flex><span>			CPU:  record.CPU,
+</span></span><span style=display:flex><span>			Lost: record.LostSamples,
+</span></span><span style=display:flex><span>			Type: payload.RecordLost,
+</span></span><span style=display:flex><span>		})
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	} <span style=color:#719e07>else</span> {
+</span></span><span style=display:flex><span>		a.<span style=color:#268bd2>notifyPerfEventLocked</span>(record.RawSample, record.CPU)
+</span></span><span style=display:flex><span>		a.<span style=color:#268bd2>sendToListenersLocked</span>(<span style=color:#719e07>&amp;</span>payload.Payload{ <span style=color:#586e75>// 广播到所有listener，也就是客户端
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>			Data: record.RawSample,
+</span></span><span style=display:flex><span>			CPU:  record.CPU, <span style=color:#586e75>// 每个cpu都有一个record，是独立的
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>			Type: payload.EventSample,
+</span></span><span style=display:flex><span>		})
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p>每个连接的client都会创建一个listener。listener会分配一个队列。当一个event生成后，event会被广播到所有listener的队列中，队列中的event会被listener消费并发送给client。发送给client的数据都是raw data，需要client自行解析</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span><span style=color:#586e75>// listenerv1_2 implements the cilium-node-monitor API protocol compatible with
+</span></span></span><span style=display:flex><span><span style=color:#586e75>// cilium 1.2
+</span></span></span><span style=display:flex><span><span style=color:#586e75>// cleanupFn is called on exit
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#268bd2>type</span> listenerv1_2 <span style=color:#268bd2>struct</span> {
+</span></span><span style=display:flex><span>	conn      net.Conn
+</span></span><span style=display:flex><span>	queue     <span style=color:#268bd2>chan</span> <span style=color:#719e07>*</span>payload.Payload
+</span></span><span style=display:flex><span>	cleanupFn <span style=color:#268bd2>func</span>(listener.MonitorListener)
+</span></span><span style=display:flex><span>	<span style=color:#586e75>// Used to prevent queue from getting closed multiple times.
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	once sync.Once
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#268bd2>func</span> <span style=color:#268bd2>newListenerv1_2</span>(c net.Conn, queueSize <span style=color:#dc322f>int</span>, cleanupFn <span style=color:#268bd2>func</span>(listener.MonitorListener)) <span style=color:#719e07>*</span>listenerv1_2 {
+</span></span><span style=display:flex><span>	ml <span style=color:#719e07>:=</span> <span style=color:#719e07>&amp;</span>listenerv1_2{
+</span></span><span style=display:flex><span>		conn:      c,
+</span></span><span style=display:flex><span>		queue:     <span style=color:#b58900>make</span>(<span style=color:#268bd2>chan</span> <span style=color:#719e07>*</span>payload.Payload, queueSize),
+</span></span><span style=display:flex><span>		cleanupFn: cleanupFn,
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>go</span> ml.<span style=color:#268bd2>drainQueue</span>()
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> ml
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#268bd2>func</span> (ml <span style=color:#719e07>*</span>listenerv1_2) <span style=color:#268bd2>drainQueue</span>() {
+</span></span><span style=display:flex><span>	<span style=color:#719e07>defer</span> <span style=color:#268bd2>func</span>() {
+</span></span><span style=display:flex><span>		ml.<span style=color:#268bd2>cleanupFn</span>(ml)
+</span></span><span style=display:flex><span>	}()
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	enc <span style=color:#719e07>:=</span> gob.<span style=color:#268bd2>NewEncoder</span>(ml.conn)
+</span></span><span style=display:flex><span>	<span style=color:#719e07>for</span> pl <span style=color:#719e07>:=</span> <span style=color:#719e07>range</span> ml.queue {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> err <span style=color:#719e07>:=</span> pl.<span style=color:#268bd2>EncodeBinary</span>(enc); err <span style=color:#719e07>!=</span> <span style=color:#cb4b16>nil</span> { <span style=color:#586e75>//写到socket
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>			<span style=color:#719e07>switch</span> {
+</span></span><span style=display:flex><span>			<span style=color:#719e07>case</span> listener.<span style=color:#268bd2>IsDisconnected</span>(err):
+</span></span><span style=display:flex><span>				log.<span style=color:#268bd2>Debug</span>(<span style=color:#2aa198>&#34;Listener disconnected&#34;</span>)
+</span></span><span style=display:flex><span>				<span style=color:#719e07>return</span>
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>			<span style=color:#719e07>default</span>:
+</span></span><span style=display:flex><span>				log.<span style=color:#268bd2>WithError</span>(err).<span style=color:#268bd2>Warn</span>(<span style=color:#2aa198>&#34;Removing listener due to write failure&#34;</span>)
+</span></span><span style=display:flex><span>				<span style=color:#719e07>return</span>
+</span></span><span style=display:flex><span>			}
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p>具体报文解析代码位于<code>pkg/monitor/format/format.go</code></p><h4 id=perfreader的实现>perf.Reader的实现</h4><p>下面详细展开一下cilium对于perf.Reader的实现</p><p>主要流程：</p><ol><li>为每个cpu创建perf event</li><li>perf event的fd做mmap映射，拿到内存地址</li><li>fd加到epoll</li><li>启动readInto，大部分时候epoll wait等待，直到有epoll事件时从ring中读取event</li></ol><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span><span style=color:#268bd2>func</span> <span style=color:#268bd2>NewReaderWithOptions</span>(array <span style=color:#719e07>*</span>ebpf.Map, perCPUBuffer <span style=color:#dc322f>int</span>, opts ReaderOptions) (pr <span style=color:#719e07>*</span>Reader, err <span style=color:#dc322f>error</span>) {
+</span></span><span style=display:flex><span>	closeOnError <span style=color:#719e07>:=</span> <span style=color:#268bd2>func</span>(c io.Closer) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> err <span style=color:#719e07>!=</span> <span style=color:#cb4b16>nil</span> {
+</span></span><span style=display:flex><span>			c.<span style=color:#268bd2>Close</span>()
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> perCPUBuffer &lt; <span style=color:#2aa198>1</span> {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#cb4b16>nil</span>, errors.<span style=color:#268bd2>New</span>(<span style=color:#2aa198>&#34;perCPUBuffer must be larger than 0&#34;</span>)
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> opts.WakeupEvents &gt; <span style=color:#2aa198>0</span> <span style=color:#719e07>&amp;&amp;</span> opts.Watermark &gt; <span style=color:#2aa198>0</span> {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#cb4b16>nil</span>, errors.<span style=color:#268bd2>New</span>(<span style=color:#2aa198>&#34;WakeupEvents and Watermark cannot both be non-zero&#34;</span>)
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>var</span> (
+</span></span><span style=display:flex><span>		nCPU     = <span style=color:#b58900>int</span>(array.<span style=color:#268bd2>MaxEntries</span>())
+</span></span><span style=display:flex><span>		rings    = <span style=color:#b58900>make</span>([]<span style=color:#719e07>*</span>perfEventRing, <span style=color:#2aa198>0</span>, nCPU)
+</span></span><span style=display:flex><span>		eventFds = <span style=color:#b58900>make</span>([]<span style=color:#719e07>*</span>sys.FD, <span style=color:#2aa198>0</span>, nCPU)
+</span></span><span style=display:flex><span>	)
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	poller, err <span style=color:#719e07>:=</span> epoll.<span style=color:#268bd2>New</span>() <span style=color:#586e75>// 使用epoll读取fd
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	<span style=color:#719e07>if</span> err <span style=color:#719e07>!=</span> <span style=color:#cb4b16>nil</span> {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#cb4b16>nil</span>, err
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>	<span style=color:#719e07>defer</span> <span style=color:#268bd2>closeOnError</span>(poller)
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#586e75>// bpf_perf_event_output checks which CPU an event is enabled on,
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	<span style=color:#586e75>// but doesn&#39;t allow using a wildcard like -1 to specify &#34;all CPUs&#34;.
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	<span style=color:#586e75>// Hence we have to create a ring for each CPU.
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	bufferSize <span style=color:#719e07>:=</span> <span style=color:#2aa198>0</span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>for</span> i <span style=color:#719e07>:=</span> <span style=color:#2aa198>0</span>; i &lt; nCPU; i<span style=color:#719e07>++</span> { <span style=color:#586e75>//编译所有可能的cpu
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>		event, ring, err <span style=color:#719e07>:=</span> <span style=color:#268bd2>newPerfEventRing</span>(i, perCPUBuffer, opts)
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> errors.<span style=color:#268bd2>Is</span>(err, unix.ENODEV) {
+</span></span><span style=display:flex><span>			<span style=color:#586e75>// The requested CPU is currently offline, skip it.
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>			<span style=color:#719e07>continue</span>
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> err <span style=color:#719e07>!=</span> <span style=color:#cb4b16>nil</span> {
+</span></span><span style=display:flex><span>			<span style=color:#719e07>return</span> <span style=color:#cb4b16>nil</span>, fmt.<span style=color:#268bd2>Errorf</span>(<span style=color:#2aa198>&#34;failed to create perf ring for CPU %d: %v&#34;</span>, i, err)
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>		<span style=color:#719e07>defer</span> <span style=color:#268bd2>closeOnError</span>(event)
+</span></span><span style=display:flex><span>		<span style=color:#719e07>defer</span> <span style=color:#268bd2>closeOnError</span>(ring)
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>		bufferSize = ring.<span style=color:#268bd2>size</span>()
+</span></span><span style=display:flex><span>		rings = <span style=color:#b58900>append</span>(rings, ring)
+</span></span><span style=display:flex><span>		eventFds = <span style=color:#b58900>append</span>(eventFds, event)
+</span></span><span style=display:flex><span>		<span style=color:#586e75>/* 将fd加入到epoll */</span>
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> err <span style=color:#719e07>:=</span> poller.<span style=color:#268bd2>Add</span>(event.<span style=color:#268bd2>Int</span>(), <span style=color:#2aa198>0</span>); err <span style=color:#719e07>!=</span> <span style=color:#cb4b16>nil</span> {
+</span></span><span style=display:flex><span>			<span style=color:#719e07>return</span> <span style=color:#cb4b16>nil</span>, err
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#586e75>// Closing a PERF_EVENT_ARRAY removes all event fds
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	<span style=color:#586e75>// stored in it, so we keep a reference alive.
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	array, err = array.<span style=color:#268bd2>Clone</span>()
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> err <span style=color:#719e07>!=</span> <span style=color:#cb4b16>nil</span> {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#cb4b16>nil</span>, err
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	pr = <span style=color:#719e07>&amp;</span>Reader{
+</span></span><span style=display:flex><span>		array:        array,
+</span></span><span style=display:flex><span>		rings:        rings,
+</span></span><span style=display:flex><span>		poller:       poller,
+</span></span><span style=display:flex><span>		deadline:     time.Time{},
+</span></span><span style=display:flex><span>		epollEvents:  <span style=color:#b58900>make</span>([]unix.EpollEvent, <span style=color:#b58900>len</span>(rings)),
+</span></span><span style=display:flex><span>		epollRings:   <span style=color:#b58900>make</span>([]<span style=color:#719e07>*</span>perfEventRing, <span style=color:#2aa198>0</span>, <span style=color:#b58900>len</span>(rings)),
+</span></span><span style=display:flex><span>		eventHeader:  <span style=color:#b58900>make</span>([]<span style=color:#dc322f>byte</span>, perfEventHeaderSize),
+</span></span><span style=display:flex><span>		eventFds:     eventFds,
+</span></span><span style=display:flex><span>		overwritable: opts.Overwritable,
+</span></span><span style=display:flex><span>		bufferSize:   bufferSize,
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> err = pr.<span style=color:#268bd2>Resume</span>(); err <span style=color:#719e07>!=</span> <span style=color:#cb4b16>nil</span> {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#cb4b16>nil</span>, err
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>	runtime.<span style=color:#268bd2>SetFinalizer</span>(pr, (<span style=color:#719e07>*</span>Reader).Close)
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> pr, <span style=color:#cb4b16>nil</span>
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#268bd2>func</span> <span style=color:#268bd2>newPerfEventRing</span>(cpu, perCPUBuffer <span style=color:#dc322f>int</span>, opts ReaderOptions) (_ <span style=color:#719e07>*</span>sys.FD, _ <span style=color:#719e07>*</span>perfEventRing, err <span style=color:#dc322f>error</span>) {
+</span></span><span style=display:flex><span>	closeOnError <span style=color:#719e07>:=</span> <span style=color:#268bd2>func</span>(c io.Closer) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> err <span style=color:#719e07>!=</span> <span style=color:#cb4b16>nil</span> {
+</span></span><span style=display:flex><span>			c.<span style=color:#268bd2>Close</span>()
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> opts.Watermark <span style=color:#719e07>&gt;=</span> perCPUBuffer {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#cb4b16>nil</span>, <span style=color:#cb4b16>nil</span>, errors.<span style=color:#268bd2>New</span>(<span style=color:#2aa198>&#34;watermark must be smaller than perCPUBuffer&#34;</span>)
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	fd, err <span style=color:#719e07>:=</span> <span style=color:#268bd2>createPerfEvent</span>(cpu, opts) <span style=color:#586e75>//创建perfEvent，得到对应的fd
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	<span style=color:#719e07>if</span> err <span style=color:#719e07>!=</span> <span style=color:#cb4b16>nil</span> {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#cb4b16>nil</span>, <span style=color:#cb4b16>nil</span>, err
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>	<span style=color:#719e07>defer</span> <span style=color:#268bd2>closeOnError</span>(fd)
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> err <span style=color:#719e07>:=</span> unix.<span style=color:#268bd2>SetNonblock</span>(fd.<span style=color:#268bd2>Int</span>(), <span style=color:#cb4b16>true</span>); err <span style=color:#719e07>!=</span> <span style=color:#cb4b16>nil</span> {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#cb4b16>nil</span>, <span style=color:#cb4b16>nil</span>, err
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	protections <span style=color:#719e07>:=</span> unix.PROT_READ
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> !opts.Overwritable {
+</span></span><span style=display:flex><span>		protections <span style=color:#719e07>|=</span> unix.PROT_WRITE
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	mmap, err <span style=color:#719e07>:=</span> unix.<span style=color:#268bd2>Mmap</span>(fd.<span style=color:#268bd2>Int</span>(), <span style=color:#2aa198>0</span>, <span style=color:#268bd2>perfBufferSize</span>(perCPUBuffer), protections, unix.MAP_SHARED) <span style=color:#586e75>// mmap到该ring的地址空间
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	<span style=color:#719e07>if</span> err <span style=color:#719e07>!=</span> <span style=color:#cb4b16>nil</span> {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#cb4b16>nil</span>, <span style=color:#cb4b16>nil</span>, fmt.<span style=color:#268bd2>Errorf</span>(<span style=color:#2aa198>&#34;can&#39;t mmap: %v&#34;</span>, err)
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#586e75>// This relies on the fact that we allocate an extra metadata page,
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	<span style=color:#586e75>// and that the struct is smaller than an OS page.
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	<span style=color:#586e75>// This use of unsafe.Pointer isn&#39;t explicitly sanctioned by the
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	<span style=color:#586e75>// documentation, since a byte is smaller than sampledPerfEvent.
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	meta <span style=color:#719e07>:=</span> (<span style=color:#719e07>*</span>unix.PerfEventMmapPage)(unsafe.<span style=color:#268bd2>Pointer</span>(<span style=color:#719e07>&amp;</span>mmap[<span style=color:#2aa198>0</span>]))
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>var</span> reader ringReader
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> opts.Overwritable {
+</span></span><span style=display:flex><span>		reader = <span style=color:#268bd2>newReverseReader</span>(meta, mmap[meta.Data_offset:meta.Data_offset<span style=color:#719e07>+</span>meta.Data_size])
+</span></span><span style=display:flex><span>	} <span style=color:#719e07>else</span> {
+</span></span><span style=display:flex><span>		reader = <span style=color:#268bd2>newForwardReader</span>(meta, mmap[meta.Data_offset:meta.Data_offset<span style=color:#719e07>+</span>meta.Data_size])
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	ring <span style=color:#719e07>:=</span> <span style=color:#719e07>&amp;</span>perfEventRing{
+</span></span><span style=display:flex><span>		cpu:        cpu,
+</span></span><span style=display:flex><span>		mmap:       mmap,
+</span></span><span style=display:flex><span>		ringReader: reader,
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>	runtime.<span style=color:#268bd2>SetFinalizer</span>(ring, (<span style=color:#719e07>*</span>perfEventRing).Close)
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> fd, ring, <span style=color:#cb4b16>nil</span>
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#268bd2>func</span> (pr <span style=color:#719e07>*</span>Reader) <span style=color:#268bd2>ReadInto</span>(rec <span style=color:#719e07>*</span>Record) <span style=color:#dc322f>error</span> {
+</span></span><span style=display:flex><span>	pr.mu.<span style=color:#268bd2>Lock</span>()
+</span></span><span style=display:flex><span>	<span style=color:#719e07>defer</span> pr.mu.<span style=color:#268bd2>Unlock</span>()
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	pr.pauseMu.<span style=color:#268bd2>Lock</span>()
+</span></span><span style=display:flex><span>	<span style=color:#719e07>defer</span> pr.pauseMu.<span style=color:#268bd2>Unlock</span>()
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> pr.overwritable <span style=color:#719e07>&amp;&amp;</span> !pr.paused {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> errMustBePaused
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> pr.rings <span style=color:#719e07>==</span> <span style=color:#cb4b16>nil</span> {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> fmt.<span style=color:#268bd2>Errorf</span>(<span style=color:#2aa198>&#34;perf ringbuffer: %w&#34;</span>, ErrClosed)
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>for</span> {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> <span style=color:#b58900>len</span>(pr.epollRings) <span style=color:#719e07>==</span> <span style=color:#2aa198>0</span> {
+</span></span><span style=display:flex><span>			<span style=color:#719e07>if</span> pe <span style=color:#719e07>:=</span> pr.pendingErr; pe <span style=color:#719e07>!=</span> <span style=color:#cb4b16>nil</span> {
+</span></span><span style=display:flex><span>				<span style=color:#586e75>// All rings have been emptied since the error occurred, return
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>				<span style=color:#586e75>// appropriate error.
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>				pr.pendingErr = <span style=color:#cb4b16>nil</span>
+</span></span><span style=display:flex><span>				<span style=color:#719e07>return</span> pe
+</span></span><span style=display:flex><span>			}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>			<span style=color:#586e75>// NB: The deferred pauseMu.Unlock will panic if Wait panics, which
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>			<span style=color:#586e75>// might obscure the original panic.
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>			pr.pauseMu.<span style=color:#268bd2>Unlock</span>()
+</span></span><span style=display:flex><span>			_, err <span style=color:#719e07>:=</span> pr.poller.<span style=color:#268bd2>Wait</span>(pr.epollEvents, pr.deadline)
+</span></span><span style=display:flex><span>			pr.pauseMu.<span style=color:#268bd2>Lock</span>()
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>			<span style=color:#719e07>if</span> errors.<span style=color:#268bd2>Is</span>(err, os.ErrDeadlineExceeded) <span style=color:#719e07>||</span> errors.<span style=color:#268bd2>Is</span>(err, ErrFlushed) {
+</span></span><span style=display:flex><span>				<span style=color:#586e75>// We&#39;ve hit the deadline, check whether there is any data in
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>				<span style=color:#586e75>// the rings that we&#39;ve not been woken up for.
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>				pr.pendingErr = err
+</span></span><span style=display:flex><span>			} <span style=color:#719e07>else</span> <span style=color:#719e07>if</span> err <span style=color:#719e07>!=</span> <span style=color:#cb4b16>nil</span> {
+</span></span><span style=display:flex><span>				<span style=color:#719e07>return</span> err
+</span></span><span style=display:flex><span>			}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>			<span style=color:#586e75>// Re-validate pr.paused since we dropped pauseMu.
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>			<span style=color:#719e07>if</span> pr.overwritable <span style=color:#719e07>&amp;&amp;</span> !pr.paused {
+</span></span><span style=display:flex><span>				<span style=color:#719e07>return</span> errMustBePaused
+</span></span><span style=display:flex><span>			}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>			<span style=color:#586e75>// Waking up userspace is expensive, make the most of it by checking
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>			<span style=color:#586e75>// all rings.
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>			<span style=color:#719e07>for</span> _, ring <span style=color:#719e07>:=</span> <span style=color:#719e07>range</span> pr.rings {
+</span></span><span style=display:flex><span>				ring.<span style=color:#268bd2>loadHead</span>()
+</span></span><span style=display:flex><span>				pr.epollRings = <span style=color:#b58900>append</span>(pr.epollRings, ring)
+</span></span><span style=display:flex><span>			}
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>		<span style=color:#586e75>// Start at the last available event. The order in which we
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>		<span style=color:#586e75>// process them doesn&#39;t matter, and starting at the back allows
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>		<span style=color:#586e75>// resizing epollRings to keep track of processed rings.
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>		err <span style=color:#719e07>:=</span> pr.<span style=color:#268bd2>readRecordFromRing</span>(rec, pr.epollRings[<span style=color:#b58900>len</span>(pr.epollRings)<span style=color:#719e07>-</span><span style=color:#2aa198>1</span>])
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> err <span style=color:#719e07>==</span> errEOR {
+</span></span><span style=display:flex><span>			<span style=color:#586e75>// We&#39;ve emptied the current ring buffer, process
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>			<span style=color:#586e75>// the next one.
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>			pr.epollRings = pr.epollRings[:<span style=color:#b58900>len</span>(pr.epollRings)<span style=color:#719e07>-</span><span style=color:#2aa198>1</span>]
+</span></span><span style=display:flex><span>			<span style=color:#719e07>continue</span>
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> err
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><h3 id=monitor样例输出>monitor样例输出</h3><p>本人开发的基于cilium的魔改版本😉（实现基本的vpc功能）</p><p><img src=/img/trace.PNG alt=trace></p></div><footer><p class=meta><span class="byline author vcard">Posted by <span class=fn>windseek</span></span>
+<time>May 26, 2025</time>
+<span class=categories>Tags:
+<a class=category href=https://scottlx.github.io/tags/ebpf>ebpf</a> <a class=category href=https://scottlx.github.io/tags/cilium>cilium</a> <a class=category href=https://scottlx.github.io/tags/k8s>k8s</a></span></p><p class=meta><a class="basic-alignment left" href=https://scottlx.github.io/posts/bpf_lpm_trie/ title="bpf lpm trie">bpf lpm trie</a></p><div id=disqus_thread></div><script type=application/javascript>window.disqus_config=function(){},function(){if(["localhost","127.0.0.1"].indexOf(window.location.hostname)!=-1){document.getElementById("disqus_thread").innerHTML="Disqus comments not available by default when the website is previewed locally.";return}var t=document,e=t.createElement("script");e.async=!0,e.src="//scottlx.disqus.com/embed.js",e.setAttribute("data-timestamp",+new Date),(t.head||t.body).appendChild(e)}()</script><noscript>Please enable JavaScript to view the <a href=https://disqus.com/?ref_noscript>comments powered by Disqus.</a></noscript><a href=https://disqus.com class=dsq-brlink>comments powered by <span class=logo-disqus>Disqus</span></a></footer></article></div><aside class="sidebar thirds"><section class="first odd"><h1>Who am I</h1><p><p>云原生网络开发 &ndash;> 高级网管(笑</p><p>golang、云计算、SDN、NFV、软件架构</p><p>记录一些工作上的笔记，主要是以太网数据面开发（包括不限于dpdk，ebpf，ovs，dpvs，vpp&mldr;)以及k8s</p><p>也会记录一些web3方面的学习探索</p></p></section><ul class=sidebar-nav><li class=sidebar-nav-item><a target=_blank rel="noopener noreferrer" href=https://github.com/scottlx title=https://github.com/scottlx><i class="fa fa-github fa-3x"></i></a>
+<a target=_blank rel="noopener noreferrer" href="https://www.facebook.com/profile.php?id=100009824623685" title="https://www.facebook.com/profile.php?id=100009824623685"><i class="fa fa-facebook fa-3x"></i></a></li></ul><section class=odd></section><section class=even><h1>Recent Posts</h1><ul id=recent_posts></ul></section></aside></div></div><footer role=contentinfo><p>Copyright &copy; 2025 windseek - <a href=https://scottlx.github.io/license/>License</a> -
+<span class=credit>Powered by <a target=_blank href=https://gohugo.io rel="noopener noreferrer">Hugo</a> and <a target=_blank href=https://github.com/parsiya/hugo-octopress/ rel="noopener noreferrer">Hugo-Octopress</a> theme.</p></footer></body></html>

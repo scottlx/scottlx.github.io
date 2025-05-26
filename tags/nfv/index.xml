@@ -1,79 +1,27 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Nfv on windseek</title><link>https://scottlx.github.io/tags/nfv/</link><description>Recent content in Nfv on windseek</description><generator>Hugo</generator><language>zh-CN</language><lastBuildDate>Mon, 03 Oct 2022 13:00:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/nfv/index.xml" rel="self" type="application/rss+xml"/><item><title>基于事务处理的vpp管控面agent</title><link>https://scottlx.github.io/posts/%E5%9F%BA%E4%BA%8E%E4%BA%8B%E5%8A%A1%E5%A4%84%E7%90%86%E7%9A%84vpp%E7%AE%A1%E6%8E%A7%E9%9D%A2agent/</link><pubDate>Mon, 03 Oct 2022 13:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E5%9F%BA%E4%BA%8E%E4%BA%8B%E5%8A%A1%E5%A4%84%E7%90%86%E7%9A%84vpp%E7%AE%A1%E6%8E%A7%E9%9D%A2agent/</guid><description>&lt;h3 id="问题背景">问题背景&lt;/h3>
-&lt;p>vpp作为vrouter，类似物理交换机，各配置项依赖关系复杂。以下为vpp配置abf策略路由的例子：&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">typedef&lt;/span> abf_policy
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>{
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> u32 policy_id;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> u32 acl_index; &lt;span style="color:#586e75">//依赖acl
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> u8 n_paths;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">vl_api_fib_path_t&lt;/span> paths[n_paths];
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>};
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>autoreply define abf_policy_add_del
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>{
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> option status&lt;span style="color:#719e07">=&lt;/span>&lt;span style="color:#2aa198">&amp;#34;in_progress&amp;#34;&lt;/span>;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> u32 client_index;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> u32 context;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">bool&lt;/span> is_add;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">vl_api_abf_policy_t&lt;/span> policy;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>};
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">typedef&lt;/span> abf_itf_attach
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>{
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> u32 policy_id;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">vl_api_interface_index_t&lt;/span> sw_if_index; &lt;span style="color:#586e75">//依赖interface，interface又会依赖其他资源
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> u32 priority;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">bool&lt;/span> is_ipv6;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>};
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>可以看到，策略路由首先依赖acl规则，之后将abf绑定至接口时需要依赖对应interface的index，且创建interface又需要依赖其他资源（绑定vrf等）。&lt;/p>
-&lt;p>除此之外，vpp配置写入存在中间状态与崩溃的问题，且无法避免。“崩溃”类似数据库写入的概念。数据必须要成功写入磁盘、磁带等持久化存储器后才能拥有持久性，只存储在，内存中的数据，一旦遇到应用程序忽然崩溃，或者数据库、操作系统一侧的崩溃，甚至是机器突然断电宕机等情况就会丢失，这些意外情况都统称为“崩溃”。&lt;/p>
-&lt;p>因此，为了解决vpp（物理交换机也适用）各配置项的依赖关系，以及保证原子性和持久性，实现崩溃恢复，需要在管控面agent侧处理好上述问题。&lt;/p>
-&lt;h3 id="事务处理">事务处理&lt;/h3>
-&lt;p>本人对分布式事务领域涉及不深，以下摘自于&lt;/p>
-&lt;p>本地事务（也可称为局部事务），是单个服务使用单个数据源场景，也就是最基本的本地数据落盘的事务。本地事务要求底层数据源需要支持事务的开启、终止、提交、回滚、嵌套等。在数据库领域（ARIES理论，基于语义的恢复与隔离），感兴趣的可以研究下commiting logging机制（OceanBase）和shadow paging&lt;/p>
-&lt;p>全局事务，是单个服务多个数据源场景。主要目的是为了解决事务一致性问题，并做到统一提交，统一回滚的功能。例如我有一个全局事务需要在A表中写入记录a（本地事务A），再在B表中写入记录b（本地事务B），A表和B表分别在两台物理机的磁盘上。在数据存储领域由X/Open XA对此发布了一个事务处理架构，且当前很多分布式事务处理框架都是基于此来设计的。主要核心如下：&lt;/p>
-&lt;ul>
-&lt;li>全局事务管理器（Transaction Manager，TM）：协调全局事务&lt;/li>
-&lt;li>局部资源管理器（Resource Manaeger，RM）：驱动本地事务&lt;/li>
-&lt;li>模型：XA，TCC，SAGA，AT 。。。&lt;/li>
-&lt;/ul>
-&lt;p>感兴趣的可以研究下阿里的seata。&lt;/p>
-&lt;h3 id="事务处理视角看待vpp管控面">事务处理视角看待vpp管控面&lt;/h3>
-&lt;h4 id="本地事务">本地事务&lt;/h4>
-&lt;ul>
-&lt;li>vpp的配置是内存上的配置，不需要落盘。&lt;/li>
-&lt;li>vpp的每个资源的api可视为一个数据源&lt;/li>
-&lt;li>数据源没有实现事务的开启、终止、提交、回滚、嵌套、设置隔离级别等能力，只提供了下发，删除，读取接口&lt;/li>
-&lt;li>上述数据源未提供的能力需要agent来补齐&lt;/li>
-&lt;/ul>
-&lt;h4 id="全局事务">全局事务&lt;/h4>
-&lt;ul>
-&lt;li>agent暴露给上层的接口可视为全局事务&lt;/li>
-&lt;li>有些全局事务只涉及单个数据源，有些全局事务涉及多个数据源&lt;/li>
-&lt;li>agent内部需要实现TM，将全局事务转为有序的本地事务列表&lt;/li>
-&lt;li>agent内部需要实现RM，调用vpp api，驱动本地事务的执行&lt;/li>
-&lt;/ul>
-&lt;p>举例：&lt;/p></description></item><item><title>初识srv6</title><link>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86srv6/</link><pubDate>Sat, 01 Oct 2022 09:18:21 +0800</pubDate><guid>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86srv6/</guid><description>&lt;p>翻译自SRv6 Network Programming
-draft-filsfils-spring-srv6-network-programming-07&lt;/p>
-&lt;h3 id="srh">SRH&lt;/h3>
-&lt;p>Segment Routing Header&lt;/p>
-&lt;p>SRH在一个报文中可以有多个&lt;/p>
-&lt;h3 id="nh">NH&lt;/h3>
-&lt;p>ipv6 next-header field&lt;/p>
-&lt;p>Srv6的Routing Header的type是4，IP6 header的NH字段是43&lt;/p>
-&lt;h3 id="sid">SID&lt;/h3>
-&lt;p>编排链节点的ID，srv6节点的SID table里面保存自己在各个编排链内的SID。local SID可以是设备外部接口（不会是内部接口）的ipv6地址。例如已经在外部接口配置了地址A和地址B，内部loopback配置了地址C。地址A和地址B会默认被加入到SID Table。&lt;/p>
-&lt;p>地址B可以是路由不可达的，为什么？&lt;/p>
-&lt;p>可以将地址A理解成全局segments，地址B为本地segments。只要报文在发送时加入了SID list&amp;lt;A,B&amp;gt;，A在B的前面，只要A对外路由可达，报文就会被送到A，然后在本地进行下一步的处理（发往本地的B）&lt;/p>
-&lt;p>(SA,DA) (S3, S2, S1; SL)&lt;/p>
-&lt;p>S1是第一跳，S3是最后一跳。SL剩下几跳，也可理解为下一个SID节点的下标。例如SL=0， 表示SRH[0]=S3，下一个SID处理节点的ip地址是S3&lt;/p>
-&lt;h3 id="sid格式">SID格式&lt;/h3>
-&lt;p>SID Table中并不是以Ip的形式保存SID的&lt;/p>
-&lt;p>LOC:FUNCT:ARGS::&lt;/p>
-&lt;h3 id="function">function&lt;/h3>
-&lt;p>每个SID可以绑定多个function。function与SID的绑定关系存在SID Table中。这个特性决定了SRV6的高度可编程性。&lt;/p>
-&lt;p>function太多，不一一列出，总结下规律&lt;/p>
-&lt;p>带有D的，表示Decapsulation，如果SL==0（已经是最后一跳）且NH!=SRH(没有嵌套另一个SRH)，且SRH的ENH（下一层header类别）符合function的定义(例如DT6，ENH必须是41(ipv6 encapsulation))，则剥去SRH&lt;/p>
-&lt;p>带有T的，表示table，查对应的fib表&lt;/p>
-&lt;p>带有X的，表示cross-connect，往邻接表对应的Ip地址发（直接拿mac）&lt;/p>
-&lt;p>带V的，表示Vlan，往对应Vlan发（改Vlan头部）&lt;/p>
-&lt;p>带B的，表示bond，insert在老的SRH和Ipv6 Header之间新插入一个SRH，将DA改为新的SRH的第一个segment；encap则是在最外面新插入一个ipv6头部，新ipv6头部SA是内部ipv6头部的SA，DA是新ipv6头部下的SRH的第一跳&lt;/p></description></item></channel></rss>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>nfv on windseek</title><link>https://scottlx.github.io/tags/nfv/</link><description>Recent content in nfv on windseek</description><generator>Hugo -- gohugo.io</generator><language>zh-CN</language><lastBuildDate>Mon, 03 Oct 2022 13:00:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/nfv/index.xml" rel="self" type="application/rss+xml"/><item><title>基于事务处理的vpp管控面agent</title><link>https://scottlx.github.io/posts/%E5%9F%BA%E4%BA%8E%E4%BA%8B%E5%8A%A1%E5%A4%84%E7%90%86%E7%9A%84vpp%E7%AE%A1%E6%8E%A7%E9%9D%A2agent/</link><pubDate>Mon, 03 Oct 2022 13:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E5%9F%BA%E4%BA%8E%E4%BA%8B%E5%8A%A1%E5%A4%84%E7%90%86%E7%9A%84vpp%E7%AE%A1%E6%8E%A7%E9%9D%A2agent/</guid><description>问题背景 vpp作为vrouter，类似物理交换机，各配置项依赖关系复杂。以下为vpp配置abf策略路由的例子：
+typedef abf_policy { u32 policy_id; u32 acl_index; //依赖acl u8 n_paths; vl_api_fib_path_t paths[n_paths]; }; autoreply define abf_policy_add_del { option status=&amp;#34;in_progress&amp;#34;; u32 client_index; u32 context; bool is_add; vl_api_abf_policy_t policy; }; typedef abf_itf_attach { u32 policy_id; vl_api_interface_index_t sw_if_index; //依赖interface，interface又会依赖其他资源 u32 priority; bool is_ipv6; }; 可以看到，策略路由首先依赖acl规则，之后将abf绑定至接口时需要依赖对应interface的index，且创建interface又需要依赖其他资源（绑定vrf等）。
+除此之外，vpp配置写入存在中间状态与崩溃的问题，且无法避免。“崩溃”类似数据库写入的概念。数据必须要成功写入磁盘、磁带等持久化存储器后才能拥有持久性，只存储在，内存中的数据，一旦遇到应用程序忽然崩溃，或者数据库、操作系统一侧的崩溃，甚至是机器突然断电宕机等情况就会丢失，这些意外情况都统称为“崩溃”。
+因此，为了解决vpp（物理交换机也适用）各配置项的依赖关系，以及保证原子性和持久性，实现崩溃恢复，需要在管控面agent侧处理好上述问题。
+事务处理 本人对分布式事务领域涉及不深，以下摘自于
+本地事务（也可称为局部事务），是单个服务使用单个数据源场景，也就是最基本的本地数据落盘的事务。本地事务要求底层数据源需要支持事务的开启、终止、提交、回滚、嵌套等。在数据库领域（ARIES理论，基于语义的恢复与隔离），感兴趣的可以研究下commiting logging机制（OceanBase）和shadow paging
+全局事务，是单个服务多个数据源场景。主要目的是为了解决事务一致性问题，并做到统一提交，统一回滚的功能。例如我有一个全局事务需要在A表中写入记录a（本地事务A），再在B表中写入记录b（本地事务B），A表和B表分别在两台物理机的磁盘上。在数据存储领域由X/Open XA对此发布了一个事务处理架构，且当前很多分布式事务处理框架都是基于此来设计的。主要核心如下：
+全局事务管理器（Transaction Manager，TM）：协调全局事务 局部资源管理器（Resource Manaeger，RM）：驱动本地事务 模型：XA，TCC，SAGA，AT 。。。 感兴趣的可以研究下阿里的seata。
+事务处理视角看待vpp管控面 本地事务 vpp的配置是内存上的配置，不需要落盘。 vpp的每个资源的api可视为一个数据源 数据源没有实现事务的开启、终止、提交、回滚、嵌套、设置隔离级别等能力，只提供了下发，删除，读取接口 上述数据源未提供的能力需要agent来补齐 全局事务 agent暴露给上层的接口可视为全局事务 有些全局事务只涉及单个数据源，有些全局事务涉及多个数据源 agent内部需要实现TM，将全局事务转为有序的本地事务列表 agent内部需要实现RM，调用vpp api，驱动本地事务的执行 举例：</description></item><item><title>初识srv6</title><link>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86srv6/</link><pubDate>Sat, 01 Oct 2022 09:18:21 +0800</pubDate><guid>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86srv6/</guid><description>翻译自SRv6 Network Programming draft-filsfils-spring-srv6-network-programming-07
+SRH Segment Routing Header
+SRH在一个报文中可以有多个
+NH ipv6 next-header field
+Srv6的Routing Header的type是4，IP6 header的NH字段是43
+SID 编排链节点的ID，srv6节点的SID table里面保存自己在各个编排链内的SID。local SID可以是设备外部接口（不会是内部接口）的ipv6地址。例如已经在外部接口配置了地址A和地址B，内部loopback配置了地址C。地址A和地址B会默认被加入到SID Table。
+地址B可以是路由不可达的，为什么？
+可以将地址A理解成全局segments，地址B为本地segments。只要报文在发送时加入了SID list&amp;lt;A,B&amp;gt;，A在B的前面，只要A对外路由可达，报文就会被送到A，然后在本地进行下一步的处理（发往本地的B）
+(SA,DA) (S3, S2, S1; SL)
+S1是第一跳，S3是最后一跳。SL剩下几跳，也可理解为下一个SID节点的下标。例如SL=0， 表示SRH[0]=S3，下一个SID处理节点的ip地址是S3
+SID格式 SID Table中并不是以Ip的形式保存SID的
+LOC:FUNCT:ARGS::
+function 每个SID可以绑定多个function。function与SID的绑定关系存在SID Table中。这个特性决定了SRV6的高度可编程性。
+function太多，不一一列出，总结下规律
+带有D的，表示Decapsulation，如果SL==0（已经是最后一跳）且NH!=SRH(没有嵌套另一个SRH)，且SRH的ENH（下一层header类别）符合function的定义(例如DT6，ENH必须是41(ipv6 encapsulation))，则剥去SRH
+带有T的，表示table，查对应的fib表
+带有X的，表示cross-connect，往邻接表对应的Ip地址发（直接拿mac）
+带V的，表示Vlan，往对应Vlan发（改Vlan头部）
+带B的，表示bond，insert在老的SRH和Ipv6 Header之间新插入一个SRH，将DA改为新的SRH的第一个segment；encap则是在最外面新插入一个ipv6头部，新ipv6头部SA是内部ipv6头部的SA，DA是新ipv6头部下的SRH的第一跳</description></item></channel></rss>

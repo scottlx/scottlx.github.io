@@ -1,1104 +1,262 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>windseek</title><link>https://scottlx.github.io/</link><description>Recent content on windseek</description><generator>Hugo</generator><language>zh-CN</language><lastBuildDate>Thu, 06 Mar 2025 15:49:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/index.xml" rel="self" type="application/rss+xml"/><item><title>bpf lpm trie</title><link>https://scottlx.github.io/posts/bpf_lpm_trie/</link><pubDate>Thu, 06 Mar 2025 15:49:00 +0800</pubDate><guid>https://scottlx.github.io/posts/bpf_lpm_trie/</guid><description>&lt;p>lpm有多种实现方式，最常用的是用trie。当然也会有更简单的实现方式，例如某些特定场景用多重哈希表就能解决（ipv4地址，32个掩码对应32个哈希表）&lt;/p>
-&lt;p>从4.11内核版本开始，bpf map引入了&lt;code>BPF_MAP_TYPE_LPM_TRIE&lt;/code>&lt;/p>
-&lt;p>主要是用于匹配ip地址，内部是将数据存储在一个不平衡的trie中，key使用&lt;code>prefixlen,data&lt;/code>&lt;/p>
-&lt;p>data是以大端网络序存储的，data[0]存的是msb。&lt;/p>
-&lt;p>prefixlen支持8的整数倍，最高可以是2048。因此除了ip匹配，还可以用来做端口，协议，vpcid等等的扩充匹配。在应用层面上除了做路由表，还可以作为acl，policy等匹配过滤的底层实现&lt;/p>
-&lt;h4 id="使用方式">使用方式&lt;/h4>
-&lt;p>
-&lt;a href="https://docs.kernel.org/next/bpf/map_lpm_trie.html" target="_blank" rel="noopener">BPF_MAP_TYPE_LPM_TRIE — The Linux Kernel documentation&lt;/a>&lt;/p>
-&lt;p>除了上述基本的Ipv4的使用方式，扩展使用方式可以参考一下cillium中IPCACHE_MAP的使用&lt;/p>
-&lt;p>首先是map的定义&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">struct&lt;/span> ipcache_key {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">struct&lt;/span> bpf_lpm_trie_key lpm_key;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	__u16 cluster_id;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	__u8 pad1;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	__u8 family;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">union&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">struct&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			__u32		ip4;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			__u32		pad4;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			__u32		pad5;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			__u32		pad6;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		};
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">union&lt;/span> v6addr	ip6;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	};
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>} __packed;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">/* Global IP -&amp;gt; Identity map for applying egress label-based policy */&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">struct&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__uint&lt;/span>(type, BPF_MAP_TYPE_LPM_TRIE);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__type&lt;/span>(key, &lt;span style="color:#719e07">struct&lt;/span> ipcache_key);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__type&lt;/span>(value, &lt;span style="color:#719e07">struct&lt;/span> remote_endpoint_info);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__uint&lt;/span>(pinning, LIBBPF_PIN_BY_NAME);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__uint&lt;/span>(max_entries, IPCACHE_MAP_SIZE);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__uint&lt;/span>(map_flags, BPF_F_NO_PREALLOC);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>} IPCACHE_MAP __section_maps_btf;
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>可以看到cillium将v4和v6合并成一个map查询，匹配条件并带上了&lt;code>cluster_id&lt;/code>&lt;/p></description></item><item><title>cilium datapath</title><link>https://scottlx.github.io/posts/cilium-datapath/</link><pubDate>Mon, 03 Mar 2025 18:15:00 +0800</pubDate><guid>https://scottlx.github.io/posts/cilium-datapath/</guid><description>&lt;h3 id="hook点">hook点&lt;/h3>
-&lt;p>大部分是挂载位置是tc，tc是网络协议栈初始处理挂载点&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">// linux source code: dev.c
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span>__netif_receive_skb_core
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">|&lt;/span> &lt;span style="color:#268bd2">list_for_each_entry_rcu&lt;/span>(ptype, &lt;span style="color:#719e07">&amp;amp;&lt;/span>ptype_all, list) {...} &lt;span style="color:#586e75">// packet capture
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">|&lt;/span> do_xdp_generic &lt;span style="color:#586e75">// handle generic xdp
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">|&lt;/span> sch_handle_ingress &lt;span style="color:#586e75">// tc ingress
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">|&lt;/span> tcf_classify
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">|&lt;/span> __tcf_classify &lt;span style="color:#586e75">// ebpf program is working here
-&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>如果没有下发policy，xdp就不会挂载各类filter程序&lt;/p>
-&lt;p>&lt;img src="https://rexrock.github.io/post-images/1614297388691.png" alt="cilium datapath">&lt;/p>
-&lt;h3 id="网络设备">网络设备&lt;/h3>
-&lt;p>cillium的网络方案不像常规的网桥模式（ovs，linux bridge），datapath不是一个完整的run to completion，而是分散在各个虚拟接口上，类似pipeline模式&lt;/p>
-&lt;p>cillium_host: 集群内所有podCIDR的网关，地址对容器可见&lt;/p>
-&lt;p>cilium_net: cilium_host的veth对，ipvlan模式才会用到？&lt;/p>
-&lt;p>clilium_vxlan: 用来提供Pod跨节点通信overlay封装&lt;/p>
-&lt;p>lxcXXXX: 容器veth对在主机侧的接口&lt;/p>
-&lt;h3 id="同节点pod2pod">同节点pod2pod&lt;/h3>
-&lt;p>cillium_host是所有pod的网关，因此会先arp request该地址。arp相应其实是在lxc处被代答了，arp报文不会走到cillium_host&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">// bpf_lxc.c
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span>__section_entry
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#dc322f">int&lt;/span> &lt;span style="color:#268bd2">cil_from_container&lt;/span>(&lt;span style="color:#719e07">struct&lt;/span> __ctx_buff &lt;span style="color:#719e07">*&lt;/span>ctx)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>{
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	...
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">case&lt;/span> &lt;span style="color:#268bd2">bpf_htons&lt;/span>(ETH_P_ARP)&lt;span style="color:#719e07">:&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		ret &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#268bd2">tail_call_internal&lt;/span>(ctx, CILIUM_CALL_ARP, &lt;span style="color:#719e07">&amp;amp;&lt;/span>ext_err);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">break&lt;/span>;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	...
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#268bd2">__section_tail&lt;/span>(CILIUM_MAP_CALLS, CILIUM_CALL_ARP)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#dc322f">int&lt;/span> &lt;span style="color:#268bd2">tail_handle_arp&lt;/span>(&lt;span style="color:#719e07">struct&lt;/span> __ctx_buff &lt;span style="color:#719e07">*&lt;/span>ctx)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>{
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">union&lt;/span> macaddr mac &lt;span style="color:#719e07">=&lt;/span> THIS_INTERFACE_MAC;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">union&lt;/span> macaddr smac;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	__be32 sip;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	__be32 tip;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">/* Pass any unknown ARP requests to the Linux stack */&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">if&lt;/span> (&lt;span style="color:#719e07">!&lt;/span>&lt;span style="color:#268bd2">arp_validate&lt;/span>(ctx, &lt;span style="color:#719e07">&amp;amp;&lt;/span>mac, &lt;span style="color:#719e07">&amp;amp;&lt;/span>smac, &lt;span style="color:#719e07">&amp;amp;&lt;/span>sip, &lt;span style="color:#719e07">&amp;amp;&lt;/span>tip))
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">return&lt;/span> CTX_ACT_OK;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">/*
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * The endpoint is expected to make ARP requests for its gateway IP.
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * Most of the time, the gateway IP configured on the endpoint is
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * IPV4_GATEWAY but it may not be the case if after cilium agent reload
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * a different gateway is chosen. In such a case, existing endpoints
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * will have an old gateway configured. Since we don&amp;#39;t know the IP of
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * previous gateways, we answer requests for all IPs with the exception
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * of the LXC IP (to avoid specific problems, like IP duplicate address
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * detection checks that might run within the container).
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 */&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">if&lt;/span> (tip &lt;span style="color:#719e07">==&lt;/span> LXC_IPV4)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">return&lt;/span> CTX_ACT_OK;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">return&lt;/span> &lt;span style="color:#268bd2">arp_respond&lt;/span>(ctx, &lt;span style="color:#719e07">&amp;amp;&lt;/span>mac, tip, &lt;span style="color:#719e07">&amp;amp;&lt;/span>smac, sip, &lt;span style="color:#2aa198">0&lt;/span>);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>普通ipv4报文，走handle_ipv4_from_lxc&lt;/p></description></item><item><title>dpvs icmp session</title><link>https://scottlx.github.io/posts/dpvs-icmp/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs-icmp/</guid><description>&lt;p>原生的ipvs仅处理三种类型的ICMP报文：ICMP_DEST_UNREACH、ICMP_SOURCE_QUENCH和ICMP_TIME_EXCEEDED&lt;/p>
-&lt;p>对于不是这三种类型的ICMP，则设置为不相关联(related)的ICMP，返回NF_ACCEPT，之后走本机路由流程&lt;/p>
-&lt;p>dpvs对ipvs进行了一些修改，修改后逻辑如下&lt;/p>
-&lt;h2 id="icmp差错报文流程">icmp差错报文流程&lt;/h2>
-&lt;ul>
-&lt;li>
-&lt;p>__dp_vs_in&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>__dp_vs_in_icmp4 （处理icmp差错报文，入参related表示找到了关联的conn）&lt;/p>
-&lt;p>若不是ICMP_DEST_UNREACH，ICMP_SOURCE_QUENCH，ICMP_TIME_EXCEEDED，返回到_dp_vs_in走普通conn命中流程&lt;/p>
-&lt;p>icmp差错报文，需要将报文头偏移到icmp头内部的ip头，&lt;strong>根据内部ip头查找内部ip的conn&lt;/strong>。&lt;/p>
-&lt;p>若找到conn，&lt;strong>表明此ICMP报文是由之前客户端的请求报文所触发的，由真实服务器回复的ICMP报文&lt;/strong>。将related置1&lt;/p>
-&lt;p>若未找到则返回accept，返回到_dp_vs_in走普通conn命中流程&lt;/p>
-&lt;ul>
-&lt;li>​ __xmit_inbound_icmp4&lt;/li>
-&lt;/ul>
-&lt;p>​ 找net和local路由，之后走__dp_vs_xmit_icmp4&lt;/p>
-&lt;ul>
-&lt;li>__dp_vs_xmit_icmp4&lt;/li>
-&lt;/ul>
-&lt;p>​ 数据区的前8个字节恰好覆盖了TCP报文或UDP报文中的端口号字段（前四个字节）&lt;/p>
-&lt;p>inbound方向根据内部ip的conn修改数据区目的端口为conn-&amp;gt;dport，源端口改为conn-&amp;gt;localport，&lt;/p>
-&lt;p>outbound方向将目的端口改为conn-&amp;gt;cport，源端口改为conn-&amp;gt;vport&lt;/p>
-&lt;p>​&lt;/p>
-&lt;p>client (cport ) &amp;lt;&amp;ndash;&amp;gt; (vport)lb(lport) &amp;lt;&amp;ndash;&amp;gt; rs(dport)&lt;/p>
-&lt;p>​ 重新计算icmp头的checksum，走ipv4_output&lt;/p>
-&lt;/li>
-&lt;/ul>
-&lt;p>&lt;img src="https://scottlx.github.io/img/dpvs/icmp%E5%B7%AE%E9%94%99%E6%8A%A5%E6%96%87.png" alt="报文格式">&lt;/p>
-&lt;p>&lt;strong>实际应用上的问题&lt;/strong>&lt;/p>
-&lt;p>某个rs突然下线，导致有时访问vip轮询到了不可达的rs，rs侧的网关发送了一个dest_unreach的icmp包&lt;/p>
-&lt;p>该rs的conn还未老化，__dp_vs_in_icmp4流程根据这个icmp的内部差错ip头找到了还未老化的conn，将icmp数据区的port进行修改发回给client&lt;/p>
-&lt;p>但是一般情况，rs下线后，该rs的conn会老化消失，内层conn未命中，还是走外层icmp的conn命中流程转给client。这样内部数据区的端口信息是错的（dport-&amp;gt;lport，正确情况是vport-&amp;gt;cport）&lt;/p>
-&lt;h2 id="非差错报文流程">非差错报文流程&lt;/h2>
-&lt;p>返回_dp_vs_in走普通conn命中流程&lt;/p>
-&lt;p>原本dp_vs_conn_new流程中，先查找svc。icmp的svc默认使用端口0进行查找。但是ipvsadm命令却对端口0的service添加做了限制，导致无法添加这类svc。&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span> svc &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#268bd2">dp_vs_service_lookup&lt;/span>(iph&lt;span style="color:#719e07">-&amp;gt;&lt;/span>af, iph&lt;span style="color:#719e07">-&amp;gt;&lt;/span>proto, &lt;span style="color:#719e07">&amp;amp;&lt;/span>iph&lt;span style="color:#719e07">-&amp;gt;&lt;/span>daddr, &lt;span style="color:#2aa198">0&lt;/span>, &lt;span style="color:#2aa198">0&lt;/span>, mbuf, &lt;span style="color:#b58900">NULL&lt;/span>, &lt;span style="color:#719e07">&amp;amp;&lt;/span>outwall, &lt;span style="color:#268bd2">rte_lcore_id&lt;/span>());
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>若未查到走INET_ACCEPT(也就是继续往下进行走到ipv4_output_fin2查到local路由，若使用dpip addr配上了vip或lip地址，则会触发本地代答)。&lt;/p>
-&lt;p>若查到svc，则进行conn的schedule，之后会走dp_vs_laddr_bind，但是dp_vs_laddr_bind不支持icmp协议(可以整改)，最终导致svc可以查到但是conn无法建立，最后走INET_DROP。&lt;/p>
-&lt;p>概括一下：&lt;/p>
-&lt;ul>
-&lt;li>
-&lt;ul>
-&lt;li>未命中svc，走后续local route，最终本地代答&lt;/li>
-&lt;li>命中svc后若conn无法建立，drop&lt;/li>
-&lt;li>命中svc且建立conn，发往rs或client&lt;/li>
-&lt;/ul>
-&lt;/li>
-&lt;/ul>
-&lt;h3 id="icmp的conn">icmp的conn&lt;/h3>
-&lt;p>​&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>_ports[&lt;span style="color:#2aa198">0&lt;/span>] &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#268bd2">icmp4_id&lt;/span>(ich);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>_ports[&lt;span style="color:#2aa198">1&lt;/span>] &lt;span style="color:#719e07">=&lt;/span> ich&lt;span style="color:#719e07">-&amp;gt;&lt;/span>type &lt;span style="color:#719e07">&amp;lt;&amp;lt;&lt;/span> &lt;span style="color:#2aa198">8&lt;/span> &lt;span style="color:#719e07">|&lt;/span> ich&lt;span style="color:#719e07">-&amp;gt;&lt;/span>code;
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>Inbound hash和outboundhash的五元组都使用上述这两个port进行哈希，并与conn进行关联。&lt;/p>
-&lt;p>具体的laddr和lport保存在conn里面。其中只用到laddr做l3的fullnat。由于icmp协议没有定义proto-&amp;gt;fnat_in_handler，因此fnat时，从sa_pool分配到的lport对于icmp来说没有用。&lt;/p>
-&lt;p>试想ping request和ping reply场景：&lt;/p>
-&lt;p>由于request和reply的ich-&amp;gt;type不一样，outboundhash必定不命中(且fnat流程中的laddr_bind还会修改一次outboundhashtuple的dport，修改成sapool分配的port，因此也不会命中outbound hash)。&lt;/p>
-&lt;p>&lt;strong>一次来回的ping会创建两个conn，且都只命中inboundhash。&lt;/strong>&lt;/p>
-&lt;h2 id="个人认为比较合理的方案">个人认为比较合理的方案&lt;/h2>
-&lt;h4 id="ipvsadm">ipvsadm&lt;/h4>
-&lt;p>放通port=0的svc的创建，用户需要fwd icmp to rs时，需要添加icmp类型的svc。否则icmp会被vip或者lip代答，不会透传到rs或client&lt;/p>
-&lt;h4 id="icmp差错报文">icmp差错报文&lt;/h4>
-&lt;p>保持原状，对找不到关联的conn连接的差错报文进行drop。&lt;/p></description></item><item><title>dpvs route转发</title><link>https://scottlx.github.io/posts/dpvs-route%E8%BD%AC%E5%8F%91/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs-route%E8%BD%AC%E5%8F%91/</guid><description>&lt;p>ipv4_rcv_fin 是路由转发逻辑， INET_HOOKPRE_ROUTING 中走完hook逻辑后，根据dpvs返回值走ipv4_rcv_fin&lt;/p>
-&lt;h2 id="路由表结构体">路由表结构体&lt;/h2>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">struct&lt;/span> route_entry {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">uint8_t&lt;/span> netmask;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">short&lt;/span> metric;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">uint32_t&lt;/span> flag;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">unsigned&lt;/span> &lt;span style="color:#dc322f">long&lt;/span> mtu;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">struct&lt;/span> list_head list;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">struct&lt;/span> in_addr dest; &lt;span style="color:#586e75">//cf-&amp;gt;dst.in
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">struct&lt;/span> in_addr gw;&lt;span style="color:#586e75">// 下一跳地址，0说明是直连路由，下一跳地址就是报文自己的目的地址，对应配置的cf-&amp;gt;via.in
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">struct&lt;/span> in_addr src; &lt;span style="color:#586e75">// cf-&amp;gt;src.in， 源地址策略路由匹配
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">struct&lt;/span> netif_port &lt;span style="color:#719e07">*&lt;/span>port; &lt;span style="color:#586e75">// 出接口
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#dc322f">rte_atomic32_t&lt;/span> refcnt;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>};
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h2 id="路由类型">路由类型&lt;/h2>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">/* dpvs defined. */&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define RTF_FORWARD 0x0400
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define RTF_LOCALIN 0x0800
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define RTF_DEFAULT 0x1000
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define RTF_KNI 0X2000
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define RTF_OUTWALL 0x4000
-&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h2 id="路由表类型">路由表类型&lt;/h2>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define this_route_lcore (RTE_PER_LCORE(route_lcore))
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define this_local_route_table (this_route_lcore.local_route_table)
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define this_net_route_table (this_route_lcore.net_route_table)
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define this_gfw_route_table (this_route_lcore.gfw_route_table)
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define this_num_routes (RTE_PER_LCORE(num_routes))
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#define this_num_out_routes (RTE_PER_LCORE(num_out_routes))
-&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;ul>
-&lt;li>Local 类型路由&lt;/li>
-&lt;/ul>
-&lt;p>local 类型路由的作用和 Linux 下的 local 路由表的功能基本一样，主要是记录本地的 IP 地址。
-我们知道进入的数据包，过了 prerouting 后是需要经过路由查找，如果确定是本地路由（本地 IP）就会进入 LocalIn 位置，否则丢弃或进入 Forward。&lt;/p></description></item><item><title>dpvs session 同步</title><link>https://scottlx.github.io/posts/dpvs-session%E5%90%8C%E6%AD%A5/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs-session%E5%90%8C%E6%AD%A5/</guid><description>&lt;h2 id="总体架构">总体架构&lt;/h2>
-&lt;h4 id="lb-session同步采用分布式架构session创建流程触发session数据发送依次向集群内所有其他节点发送">lb session同步采用分布式架构，session创建流程触发session数据发送，依次向集群内所有其他节点发送&lt;/h4>
-&lt;p>其他节点收到新的session数据修改本地session表。
-session接收和发送各占一个独立线程。&lt;/p>
-&lt;h3 id="step1-向所有其他节点发送session数据">step1: 向所有其他节点发送session数据&lt;/h3>
-&lt;p>remote session：从别的节点同步来的session&lt;/p>
-&lt;p>local session：本节点收到数据包自己生成的session&lt;/p>
-&lt;h3 id="step2-session同步至worker">step2: session同步至worker&lt;/h3>
-&lt;h4 id="方案一有锁">方案一（有锁）：&lt;/h4>
-&lt;p>&lt;img src="https://scottlx.github.io/img/dpvs/session%E5%90%8C%E6%AD%A5%E6%9C%89%E9%94%81.png" alt="Alt text">&lt;/p>
-&lt;p>•	独立进程和core处理session同步（per numa）
-•	每个lcore分配local session和remote session，正常情况下都能直接从local session走掉
-•	同步过来的session写到remote session表
-•	session ip根据fdir走到指定进程&lt;/p>
-&lt;h4 id="方案二无锁">方案二（无锁）：&lt;/h4>
-&lt;p>&lt;img src="https://scottlx.github.io/img/dpvs/session%E5%90%8C%E6%AD%A5%E6%97%A0%E9%94%81.png" alt="Alt text">
-•	独立进程和core处理session同步消息
-•	每个lcore 有来local session和remote session，通过owner属性区分。
-•	同步过来的session由session_sync core发消息给对应的slave，由对应的slave进行读写，因此可以做到无锁。
-•	session ip根据fdir走到指定core&lt;/p>
-&lt;h4 id="session同步具体实现">session同步具体实现&lt;/h4>
-&lt;h5 id="亟待解决的问题">亟待解决的问题：&lt;/h5>
-&lt;ol>
-&lt;li>
-&lt;p>同步过来的session什么时候老化？&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>别的节点上线，本节点要发送哪些session？&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>别的节点下线，本节点要删除哪些session？&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>是否要响应下线节点的删除/老化请求？&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>下线节点怎么知道自己已经下线（数据面）？&lt;/p>
-&lt;/li>
-&lt;/ol>
-&lt;h5 id="解决方案">解决方案：&lt;/h5>
-&lt;h6 id="方案一-session增加owner属性c">方案一： session增加owner属性c&lt;/h6>
-&lt;p>owner属性：&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>conn.owner &lt;span style="color:#586e75">// indicates who has this session
-&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>session 同步状态转移图&lt;/p>
-&lt;p>&lt;img src="https://scottlx.github.io/img/dpvs/session%E5%90%8C%E6%AD%A5%E7%8A%B6%E6%80%81%E8%BD%AC%E7%A7%BB.png" alt="Alt text">&lt;/p>
-&lt;p>一条session在一个集群中，应当只有一台机器在使用，所以有一个owner属性，代表这条session被谁拥有，其它所有机器只对这条session的owner发起的增删改查请求做响应。&lt;/p>
-&lt;p>&lt;strong>同步动作&lt;/strong>
-session同步应当时实时的。在以下场景被触发：
-&lt;strong>新建session&lt;/strong>
-发送方：
-session新建完成之后：对于tcp，是握手完毕的；对于udp，是第一条连接。
-接收方：
-接收来自发送方的session，在对应core上新建这条连接，开启老化，老化时间设定为默认时间（1小时）。
-fin/rst
-发送方：
-发送删除session消息
-接收方：
-接收方接收session，做完校验后在对应core上删除session
-&lt;strong>老化&lt;/strong>
-发送方：
-老化时间超时之后，本地session删除，同时发布老化信息，告知其它lb，
-接收方：
-其它lb 做完校验后，开始老化这条session。
-&lt;strong>设备下线&lt;/strong>
-下线后通过控制器更新其他lb的session同步地址信息，不再向该设备同步，同时开始老化全部属于该设备的session。
-&lt;strong>设备上线（包含设备扩容）&lt;/strong>
-新设备：
-新上线设备引流前要接收其他设备的存量session信息，这个功能通过控制器触发完成，控制器感知到新lb上线后通知集群内其他lb向它同步存量session，session数量达到一致时（阿里gw用70%阈值）允许新lb引流。
-旧设备：
-向目的方发送全部的属于自己的session。&lt;/p></description></item><item><title>dpvs 数据流分析</title><link>https://scottlx.github.io/posts/dpvs%E6%95%B0%E6%8D%AE%E6%B5%81%E5%88%86%E6%9E%90/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs%E6%95%B0%E6%8D%AE%E6%B5%81%E5%88%86%E6%9E%90/</guid><description>&lt;h2 id="dpvs-ingress流程分析">dpvs ingress流程分析&lt;/h2>
-&lt;p>从 &lt;em>lcore_job_recv_fwd&lt;/em> 开始，这个是dpvs收取报文的开始&lt;/p>
-&lt;h3 id="设备层">设备层&lt;/h3>
-&lt;p>dev-&amp;gt;flag &amp;amp; NETIF_PORT_FLAG_FORWARD2KNI &amp;mdash;&amp;gt; 则拷贝一份mbuf到kni队列中，这个由命令行和配置文件决定（做流量镜像，用于抓包）&lt;/p>
-&lt;h3 id="eth层">eth层&lt;/h3>
-&lt;p>&lt;em>netif_rcv_mbuf&lt;/em> 这里面涉及到vlan的部分不做过多解析&lt;/p>
-&lt;ul>
-&lt;li>
-&lt;p>不支持的协议&lt;/p>
-&lt;p>目前dpvs支持的协议为ipv4, ipv6, arp。 其它报文类型直接丢给内核。其他类型可以看 
-&lt;a href="https://en.wikipedia.org/wiki/EtherType#cite_note-ethtypes-3" target="_blank" rel="noopener">eth_types&lt;/a>。 
-&lt;a href="#dpvs_kni_ingress">to_kni&lt;/a>&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>RTE_ARP_OP_REPLY&lt;/p>
-&lt;p>复制 &lt;em>nworks-1&lt;/em> 份mbuf，发送到其它worker的arp_ring上 ( &lt;em>&lt;strong>to_other_worker&lt;/strong>&lt;/em> ), 这份报文fwd到
-&lt;a href="#arp%e5%8d%8f%e8%ae%ae">arp协议&lt;/a>.&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>RTE_ARP_OP_REQUEST&lt;/p>
-&lt;p>这份报文fwd到
-&lt;a href="#arp%e5%8d%8f%e8%ae%ae">arp协议&lt;/a>.&lt;/p>
-&lt;/li>
-&lt;/ul>
-&lt;h3 id="arp协议">arp协议&lt;/h3>
-&lt;ul>
-&lt;li>
-&lt;p>arp协议处理 &lt;em>neigh_resolve_input&lt;/em>&lt;/p>
-&lt;ul>
-&lt;li>
-&lt;p>RTE_ARP_OP_REPLY&lt;/p>
-&lt;p>建立邻居表，记录信息，并且把这个报文送给内核。
-&lt;a href="#dpvs_kni_ingress">to_kni&lt;/a>&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>RTE_ARP_OP_REQUEST&lt;/p>
-&lt;p>无条件返回网卡的ip以及mac地址 (&lt;em>free arp&lt;/em>), &lt;em>netif_xmit&lt;/em> 发送到 
-&lt;a href="#dpvs_egress%e6%8a%a5%e6%96%87%e5%88%86%e6%9e%90">core_tx_queue&lt;/a>&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>其它op_code&lt;/p>
-&lt;p>
-&lt;a href="#%e6%8a%a5%e6%96%87drop">drop&lt;/a>&lt;/p>
-&lt;/li>
-&lt;/ul>
-&lt;/li>
-&lt;/ul>
-&lt;h3 id="ip层">ip层&lt;/h3>
-&lt;ul>
-&lt;li>ipv4协议 (ipv6数据流程上一致)
-&lt;ul>
-&lt;li>
-&lt;p>&lt;em>ipv4_rcv&lt;/em>&lt;/p>
-&lt;ul>
-&lt;li>
-&lt;p>ETH_PKT_OTHERHOST&lt;/p>
-&lt;p>报文的dmac不是自己，
-&lt;a href="#%e6%8a%a5%e6%96%87drop">drop&lt;/a>&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>ipv4 协议校验&lt;/p>
-&lt;p>不通过， 
-&lt;a href="#%e6%8a%a5%e6%96%87drop">drop&lt;/a>&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>下一层协议为 IPPROTO_OSPF&lt;/p>
-&lt;p>
-&lt;a href="#dpvs_kni_ingress">to_kni&lt;/a>&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>&lt;em>INET_HOOK_PRE_ROUTING hook&lt;/em>&lt;/p>
-&lt;p>hook_list: &lt;em>dp_vs_in&lt;/em> , &lt;em>dp_vs_prerouting&lt;/em>&lt;/p>
-&lt;p>这两个都与synproxy有关系，但是我们不会启用这个代理，不过需要注意的是syncproxy不通过时会丢包 
-&lt;a href="#%e6%8a%a5%e6%96%87drop">drop&lt;/a>&lt;/p>
-&lt;ul>
-&lt;li>
-&lt;p>dp_vs_in&lt;/p>
-&lt;ul>
-&lt;li>
-&lt;p>非 ETH_PKT_HOST(broadcast 或者 multicast报文)或ip报文交给 &lt;em>ipv4_rcv_fin&lt;/em> 处理&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>非 udp, tcp, icmp, icmp6报文交给 &lt;em>ipv4_rcv_fin&lt;/em> 处理&lt;/p></description></item><item><title>dpdk rcu lib</title><link>https://scottlx.github.io/posts/dpdk-rcu/</link><pubDate>Fri, 08 Dec 2023 17:48:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpdk-rcu/</guid><description>&lt;p>linux的RCU主要针对的数据对象是链表，目的是提高遍历读取数据的效率，为了达到目的使用RCU机制读取数据的时候不对链表进行耗时的加锁操作。这样在同一时间可以有多个线程同时读取该链表，并且允许一个线程对链表进行修改。RCU适用于需要频繁的读取数据，而相应修改数据并不多的情景。&lt;/p>
-&lt;p>dpdk中由于writer和reader同时访问一段内存，删除元素的时候需要确保&lt;/p>
-&lt;ol>
-&lt;li>删除时不会将内存put回allocator，而是删掉这段内存的引用。这样确保了新的访问者不会拿到这个元素的引用，而老的访问者不会在访问过程中core掉&lt;/li>
-&lt;li>只有在元素没有任何引用计数时，才释放掉该元素的内存&lt;/li>
-&lt;/ol>
-&lt;p>静默期是指线程没有持有共享内存的引用的时期，也就是下图绿色的时期&lt;/p>
-&lt;p>&lt;img src="https://doc.dpdk.org/guides/_images/rcu_general_info.svg" alt="rcu">&lt;/p>
-&lt;p>上图中，有三个read thread，T1， T2，T3。两条黑色竖线分别代表writer执行delete和free的时刻。&lt;/p>
-&lt;p>执行delete时，T1和T2还拿着entry1和entry2的reference，此时writer还不能free entry1或entry2的内存，只能删除元素的引用.&lt;/p>
-&lt;p>writer&lt;em>&lt;strong>必须等到执行delete时，当时引用该元素的的线程，都完成了一个静默期之后&lt;/strong>&lt;/em>，才可以free这个内存。&lt;/p>
-&lt;p>writer不需要等T3进入静默期，因为执行delete时，T3还在静默期。&lt;/p>
-&lt;p>如何实现RCU机制&lt;/p>
-&lt;ol>
-&lt;li>writer需要一直轮询reader的状态，看是否进入静默期。这样会导致一直循环轮询，造成额外的cpu消耗。由于需要等reader的静默期结束，reader的静默期越长，reader的数量越多，writer cpu的消耗会越大，因此我们需要短的grace period。但是如果将reader的critical section减小，虽然writer的轮询变快了，但是reader的报告次数增加，reader的cpu消耗会增加，因此我们需要长的critical section。这两者之间看似矛盾。&lt;/li>
-&lt;li>长的critical section：dpdk的lcore一般都是一个while循环。循环的开始和结束必定是静默期。循环的过程中肯定是在访问各种各样的共享内存。因此critical section的粒度可以不要很细，不要每次访问的时候退出静默期，不访问的时候进入静默期，而是将整个循环认为是critical section，只有在循环的开始退出静默期，循环的结束进入静默期。&lt;/li>
-&lt;li>短的grace period：如果是pipeline模型，并不是所有worker都会使用相同的数据结构。话句话说，同一个元素，只会被部分的worker所引用和读取。因此writer不需要等到所有worker的critical section结束，而是使用该元素的worker结束critical section。这样将grace period粒度变小之后，缩短了writer整体的grace period。这种粒度的控制是通过 qsbr 实现的&lt;/li>
-&lt;/ol>
-&lt;h2 id="如何使用rcu库">如何使用rcu库&lt;/h2>
-&lt;p>dpdk-stable-20.11.1/app/test/test_rcu_qsbr.c test_rcu_qsbr_sw_sv_3qs&lt;/p>
-&lt;p>先创建出struct rte_rcu_qsbr&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span> sz &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#268bd2">rte_rcu_qsbr_get_memsize&lt;/span>(RTE_MAX_LCORE);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> rv &lt;span style="color:#719e07">=&lt;/span> (&lt;span style="color:#719e07">struct&lt;/span> rte_rcu_qsbr &lt;span style="color:#719e07">*&lt;/span>)&lt;span style="color:#268bd2">rte_zmalloc&lt;/span>(&lt;span style="color:#b58900">NULL&lt;/span>, sz, RTE_CACHE_LINE_SIZE);
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>再初始化QS variable&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span> &lt;span style="color:#268bd2">rte_rcu_qsbr_init&lt;/span>(rv, RTE_MAX_LCORE);
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>Reader注册自己的线程号，并上线（将自己加到writer的轮询队列里面）
-online时会原子读qsbr里的token，并设置到v-&amp;gt;qsbr_cnt[thread_id].cnt中&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>(&lt;span style="color:#dc322f">void&lt;/span>)&lt;span style="color:#268bd2">rte_rcu_qsbr_thread_register&lt;/span>(rv, lcore_id);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#268bd2">rte_rcu_qsbr_thread_online&lt;/span>(rv, lcore_id);
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>每次读取共享数据后，更新自己的静默状态（rte_rcu_qsbr_quiescent）&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">do&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">for&lt;/span> (i &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#2aa198">0&lt;/span>; i &lt;span style="color:#719e07">&amp;lt;&lt;/span> num_keys; i &lt;span style="color:#719e07">+=&lt;/span> j) {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">for&lt;/span> (j &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#2aa198">0&lt;/span>; j &lt;span style="color:#719e07">&amp;lt;&lt;/span> QSBR_REPORTING_INTERVAL; j&lt;span style="color:#719e07">++&lt;/span>)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#268bd2">rte_hash_lookup&lt;/span>(tbl_rwc_test_param.h,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> keys &lt;span style="color:#719e07">+&lt;/span> i &lt;span style="color:#719e07">+&lt;/span> j);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">/* Update quiescent state counter */&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#268bd2">rte_rcu_qsbr_quiescent&lt;/span>(rv, lcore_id);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> } &lt;span style="color:#719e07">while&lt;/span> (&lt;span style="color:#719e07">!&lt;/span>writer_done);
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>rte_rcu_qsbr_quiescent 是将qsbr-&amp;gt;token更新到自己thread的token里去v-&amp;gt;qsbr_cnt[thread_id].cnt&lt;/p></description></item><item><title>contiv memif</title><link>https://scottlx.github.io/posts/contiv-memif/</link><pubDate>Fri, 07 Apr 2023 15:10:00 +0800</pubDate><guid>https://scottlx.github.io/posts/contiv-memif/</guid><description>&lt;h3 id="contiv-memif">contiv memif&lt;/h3>
-&lt;p>contiv的cni与device plugin相结合，实现了：&lt;/p>
-&lt;ol>
-&lt;li>Pod能同时接入不止一张网卡&lt;/li>
-&lt;li>Pod接入的网卡可以是tap，veth，memif&lt;/li>
-&lt;/ol>
-&lt;h4 id="deviceplugin">devicePlugin&lt;/h4>
-&lt;p>Device Plugin实际是一个运行在Kubelet所在的Node上的gRPC server，通过Unix Socket、基于以下（简化的）API来和Kubelet的gRPC server通信，并维护对应设备资源在当前Node上的注册、发现、分配、卸载。
-其中，&lt;code>ListAndWatch()&lt;/code>负责对应设备资源的discovery和watch；&lt;code>Allocate()&lt;/code>负责设备资源的分配。&lt;/p>
-&lt;p>&lt;img src="https://scottlx.github.io/img/vpp-agent/6F9684EB-7E5E-4b77-9316-32D5C92FD07E.png" alt="6F9684EB-7E5E-4b77-9316-32D5C92FD07E">&lt;/p>
-&lt;h4 id="insight">Insight&lt;/h4>
-&lt;p>&lt;img src="https://scottlx.github.io/img/vpp-agent/contiveCNI.drawio.png" alt="contiveCNI.drawio">&lt;/p>
-&lt;h5 id="kubelet">kubelet&lt;/h5>
-&lt;p>kubelet接收上图格式的API。API中的annotations定义了pod的网卡个数与类型，resources中定义了所需要的device plugin的资源，也就是memif。&lt;/p>
-&lt;p>kubelet执行常规的syncPod流程，调用contiv cni创建网络。此时会在请求中将annotation传递给cni。&lt;/p>
-&lt;p>同时，agent的DevicePluginServer会向kubelet注册rpc服务，注册contivpp.io/memif的设备资源，从而kubelet的device manager会grpc请求DevicePluginServer获取contivpp.io/memif设备资源。&lt;/p>
-&lt;h5 id="cni">cni&lt;/h5>
-&lt;p>cni实现了github.com/containernetworking/cni标准的add和del接口。实际上做的事情只是将cni请求转换为了对agent的grpc请求：解析args，并通过grpc调用agent的接口发送cniRequest，再根据grpc的返回结果，将结果再次转换成标准cni接口的返回格式&lt;/p>
-&lt;h5 id="agent">Agent&lt;/h5>
-&lt;h6 id="podmanager">podmanager&lt;/h6>
-&lt;p>podmanager实现了上述cni调用的grpc server，主要任务是将cni的request转换为内部的event数据格式，供event loop处理。&lt;/p>
-&lt;p>request是cni定义的请求数据类型，详见https://github.com/containernetworking/cni/blob/master/SPEC.md#parameters&lt;/p>
-&lt;p>event则是agent内部的关于pod事务模型，类似原生kvScheduler的针对vpp api的transaction。每一种event都会对应一个plugin去实现他的handler，供event loop调用。&lt;/p>
-&lt;h6 id="event-loop">event loop&lt;/h6>
-&lt;p>event loop是整个contiv agent的核心处理逻辑，北向对接event queue，南向调用各个EventHandler，将event转换为kvScheduler的事务。&lt;/p>
-&lt;p>执行了以下步骤：&lt;/p>
-&lt;ol>
-&lt;li>对事件的预处理，包括校验，判断事件类型，加载必要的配置等&lt;/li>
-&lt;li>判断是否是更新的事件&lt;/li>
-&lt;li>对事件的handler进行排序，并生成正向或回退的handler顺序&lt;/li>
-&lt;li>与本次事件无关的handler过滤掉&lt;/li>
-&lt;li>创建对这次事件的记录record&lt;/li>
-&lt;li>打印上述步骤生成的所有事件相关信息&lt;/li>
-&lt;li>执行事件更新或同步，生成vpp-agent里的事务&lt;/li>
-&lt;li>将contiv生成的配置与外部配置进行merge，得到最终配置&lt;/li>
-&lt;li>将最终配置的vpp-agent事务commit到agent的kvscheduler&lt;/li>
-&lt;li>若事务失败，将已经完成的操作进行回退&lt;/li>
-&lt;li>完成事件，输出记录record与计时&lt;/li>
-&lt;li>打印回退失败等不可恢复的异常&lt;/li>
-&lt;li>若开启一致性检查，则最好再执行一次同步校验&lt;/li>
-&lt;/ol>
-&lt;h6 id="devicemanager">devicemanager&lt;/h6>
-&lt;p>devicemanager既实现了对接kublet的DevicePluginServer，又实现了AllocateDevice类型的event的handler。换句话说是自己产生并处理自己的event。&lt;/p>
-&lt;p>主要业务逻辑：&lt;/p>
-&lt;ol>
-&lt;li>
-&lt;p>创建memif socket文件的目录并挂载至容器&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>创建连接socket的secret。&lt;/p>
-&lt;/li>
-&lt;/ol>
-&lt;p>上述的创建并不是真实的创建，而是把需要的信息(event.Envs, event.Annotations, event.Mounts)通过grpc返回给kublet，让kubelet去创建。&lt;/p>
-&lt;p>devicemanager还会将上述memif的信息保存在缓存中，供其他插件来获取。若缓存中信息不存在，则会调用kubelet的api获取信息。&lt;/p>
-&lt;h6 id="ipnet">ipNet&lt;/h6>
-&lt;p>ipNet插件主要负责node和pod中各类网卡的创建销毁，vxlan的分配，vrf的分配等&lt;/p>
-&lt;p>更新网卡时，ipnet会读取annotation中kv，判断网卡类型。若类型为memif，则会向deviceManager获取当前pod里各容器的memifInfo，之后根据memifInfo里的socket地址和secret，创建memif类型的网卡事务，并 push 至kvscheduler&lt;/p></description></item><item><title>数位dp</title><link>https://scottlx.github.io/posts/%E6%95%B0%E4%BD%8Ddp/</link><pubDate>Mon, 20 Mar 2023 11:50:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E6%95%B0%E4%BD%8Ddp/</guid><description>&lt;h2 id="题目特征">题目特征&lt;/h2>
-&lt;ul>
-&lt;li>
-&lt;p>要求统计满足一定条件的数的数量（即，最终目的为计数，若要结果则只能回溯爆搜得到）；&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>这些条件经过转化后可以使用「数位」的思想去理解和判断；&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>输入会提供一个数字区间（有时也只提供上界）来作为统计的限制；&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>上界很大（比如 10^{18}），暴力枚举验证会超时。&lt;/p>
-&lt;/li>
-&lt;/ul>
-&lt;h2 id="思路">思路&lt;/h2>
-&lt;p>从高到低枚举每一位，统计符合target的个数，并记录到dp数组中。枚举完毕之后则得到答案。&lt;/p>
-&lt;p>因此数位dp的第一个状态都是数位的位置，第二个状态由题意来定&lt;/p>
-&lt;h2 id="模板">模板&lt;/h2>
-&lt;p>以leetcode1012为例，统计小于等于n的数字中每一位的数字至少重复一次的个数。&lt;/p>
-&lt;p>模板时灵神的模板。难点主要是mask，isLimit，isNum这几个标识&lt;/p>
-&lt;ul>
-&lt;li>mask即dp的第二个状态，这边用到了状态压缩的思想，将0到9选过的状态压缩成一个数字(否则要10个状态)&lt;/li>
-&lt;li>isLimit 标识了本次(i)选择的范围，是否受到n的影响。如果不引进这个变量，则需要考虑当前数字的最高位来决定本次的范围(最高位==n的最高位时，本次的范围是[0,s[i]],最高位&amp;lt;n的最高位时，本次的范围是[0,9])。可以发现这个限制是有传递的性质的，因此引入这个变量能简化范围的选择过程。&lt;/li>
-&lt;li>isNum 标识了本次(i)之前是否有数字，换句话说本次(i)是否是第一个数字(最高位)。这个标识主要是解决前导0的问题，否则答案里会重复(前导两个0和前导三个0虽然是同个数字，但都会被记入答案)&lt;/li>
-&lt;/ul>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-go" data-lang="go">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#268bd2">func&lt;/span> &lt;span style="color:#268bd2">numDupDigitsAtMostN&lt;/span>(n &lt;span style="color:#dc322f">int&lt;/span>) (ans &lt;span style="color:#dc322f">int&lt;/span>) {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	s &lt;span style="color:#719e07">:=&lt;/span> strconv.&lt;span style="color:#268bd2">Itoa&lt;/span>(n) &lt;span style="color:#586e75">// s[0]是最高位&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">/* 若需要从低到高的顺序，则按如下生成
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">		for ; n &amp;gt; 0; n = n / 10 {
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 list = append(list, n%10)
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 }
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	*/&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	m &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#b58900">len&lt;/span>(s)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	dp &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#b58900">make&lt;/span>([][&lt;span style="color:#2aa198">1&lt;/span> &lt;span style="color:#719e07">&amp;lt;&amp;lt;&lt;/span> &lt;span style="color:#2aa198">10&lt;/span>]&lt;span style="color:#dc322f">int&lt;/span>, m)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">// 数位dp的第一个状态都是数位的位置，第二个状态由题意来定&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">// 问题转换为计算没有重复数字的个数，因此第二个状态记录已经选过数字的集合&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">// i 表示从高到低第i位， j是前面已经选过的数字的集合,最大为[0,9]的子集个数&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">// 例如集合 {0,2,3} 对应的二进制数为 1101 （集合的思想就是状压）&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">for&lt;/span> i &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#719e07">range&lt;/span> dp {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">for&lt;/span> j &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#719e07">range&lt;/span> dp[i] {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			dp[i][j] = &lt;span style="color:#719e07">-&lt;/span>&lt;span style="color:#2aa198">1&lt;/span> &lt;span style="color:#586e75">// -1 表示没有计算过&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">var&lt;/span> f &lt;span style="color:#268bd2">func&lt;/span>(&lt;span style="color:#dc322f">int&lt;/span>, &lt;span style="color:#dc322f">int&lt;/span>, &lt;span style="color:#dc322f">bool&lt;/span>, &lt;span style="color:#dc322f">bool&lt;/span>) &lt;span style="color:#dc322f">int&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">// mask是dp数组中第二个状态&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">// isLimit表示当前是否受到n的约束，若为true表示当前位最大填s[i]&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">// 若isLimit为true时填了s[i],则isLimit为true传递到下一位，下一位也受到n的约束&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">// isNum主要是处理前导零的问题。isNum表示i前面是否填了数字&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">// 若isNum为true，则i位可以从0开始填；否则，说明i是第一位，i可以不填，或者至少填1(因为不能有前导0)&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	f = &lt;span style="color:#268bd2">func&lt;/span>(i, mask &lt;span style="color:#dc322f">int&lt;/span>, isLimit, isNum &lt;span style="color:#dc322f">bool&lt;/span>) (res &lt;span style="color:#dc322f">int&lt;/span>) {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">if&lt;/span> i &lt;span style="color:#719e07">==&lt;/span> m { &lt;span style="color:#586e75">// base case，遍历完毕&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			&lt;span style="color:#719e07">if&lt;/span> isNum { &lt;span style="color:#586e75">// 且不是全部跳过不选的&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#719e07">return&lt;/span> &lt;span style="color:#2aa198">1&lt;/span> &lt;span style="color:#586e75">// 得到了一个合法数字&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			&lt;span style="color:#719e07">return&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">if&lt;/span> !isLimit &lt;span style="color:#719e07">&amp;amp;&amp;amp;&lt;/span> isNum {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			dv &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#719e07">&amp;amp;&lt;/span>dp[i][mask]
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			&lt;span style="color:#719e07">if&lt;/span> &lt;span style="color:#719e07">*&lt;/span>dv &lt;span style="color:#719e07">&amp;gt;=&lt;/span> &lt;span style="color:#2aa198">0&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#719e07">return&lt;/span> &lt;span style="color:#719e07">*&lt;/span>dv &lt;span style="color:#586e75">// dp匹配直接返回&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			&lt;span style="color:#719e07">defer&lt;/span> &lt;span style="color:#268bd2">func&lt;/span>() { &lt;span style="color:#719e07">*&lt;/span>dv = res }() &lt;span style="color:#586e75">// 未匹配到，则在return之后更新dp数组&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">if&lt;/span> !isNum { &lt;span style="color:#586e75">// 可以跳过当前数位&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			res &lt;span style="color:#719e07">+=&lt;/span> &lt;span style="color:#268bd2">f&lt;/span>(i&lt;span style="color:#719e07">+&lt;/span>&lt;span style="color:#2aa198">1&lt;/span>, mask, &lt;span style="color:#cb4b16">false&lt;/span>, &lt;span style="color:#cb4b16">false&lt;/span>)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		d &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#2aa198">0&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">if&lt;/span> !isNum {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			d = &lt;span style="color:#2aa198">1&lt;/span> &lt;span style="color:#586e75">// 如果前面没有填数字，必须从 1 开始（因为不能有前导零）&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		up &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#2aa198">9&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">if&lt;/span> isLimit {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			up = &lt;span style="color:#b58900">int&lt;/span>(s[i] &lt;span style="color:#719e07">-&lt;/span> &lt;span style="color:#2aa198">&amp;#39;0&amp;#39;&lt;/span>) &lt;span style="color:#586e75">// 如果前面填的数字都和 n 的一样，那么这一位至多填数字 s[i]（否则就超过 n 啦）&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">for&lt;/span> ; d &lt;span style="color:#719e07">&amp;lt;=&lt;/span> up; d&lt;span style="color:#719e07">++&lt;/span> { &lt;span style="color:#586e75">// 枚举要填入的数字 d&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			&lt;span style="color:#719e07">if&lt;/span> mask&lt;span style="color:#719e07">&amp;gt;&amp;gt;&lt;/span>d&lt;span style="color:#719e07">&amp;amp;&lt;/span>&lt;span style="color:#2aa198">1&lt;/span> &lt;span style="color:#719e07">==&lt;/span> &lt;span style="color:#2aa198">0&lt;/span> { &lt;span style="color:#586e75">// d 不在 mask 中&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				res &lt;span style="color:#719e07">+=&lt;/span> &lt;span style="color:#268bd2">f&lt;/span>(i&lt;span style="color:#719e07">+&lt;/span>&lt;span style="color:#2aa198">1&lt;/span>, mask|&lt;span style="color:#2aa198">1&lt;/span>&lt;span style="color:#719e07">&amp;lt;&amp;lt;&lt;/span>d, isLimit &lt;span style="color:#719e07">&amp;amp;&amp;amp;&lt;/span> d &lt;span style="color:#719e07">==&lt;/span> up, &lt;span style="color:#cb4b16">true&lt;/span>) &lt;span style="color:#586e75">// d写入mask， isLimit传递&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			} &lt;span style="color:#586e75">// 否则该分支的结果为0&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">return&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">return&lt;/span> n &lt;span style="color:#719e07">-&lt;/span> &lt;span style="color:#268bd2">f&lt;/span>(&lt;span style="color:#2aa198">0&lt;/span>, &lt;span style="color:#2aa198">0&lt;/span>, &lt;span style="color:#cb4b16">true&lt;/span>, &lt;span style="color:#cb4b16">false&lt;/span>)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div></description></item><item><title>raft选举流程</title><link>https://scottlx.github.io/posts/raft%E9%80%89%E4%B8%BE%E6%B5%81%E7%A8%8B/</link><pubDate>Fri, 28 Oct 2022 09:30:00 +0800</pubDate><guid>https://scottlx.github.io/posts/raft%E9%80%89%E4%B8%BE%E6%B5%81%E7%A8%8B/</guid><description>&lt;h3 id="图解">图解&lt;/h3>
-&lt;p>
-&lt;a href="http://thesecretlivesofdata.com/raft/" target="_blank" rel="noopener">Raft (thesecretlivesofdata.com)&lt;/a>&lt;/p>
-&lt;p>算法目的：实现了分布式节点的数据一致性&lt;/p>
-&lt;p>节点有三个状态：follower，candidate，leader&lt;/p>
-&lt;h3 id="leader-election">leader election&lt;/h3>
-&lt;p>初始阶段所有节点处于follower状态&lt;/p>
-&lt;p>follower状态下节点存在一个election timeout（150ms—300ms之间的随机数，随机降低了多个节点同时升级为candidate的可能性），election timeout内没有收到leader的heartbeat后，会自动升级为candidate状态，并开始一个新的election term。term是全局的，表示整个集群发生过选举的轮次(任期)。&lt;/p>
-&lt;p>candidate状态下，节点会向集群内所有节点发送requests votes请求。其他节点收到requests votes请求后，如果在本次term内还没有投过票，则会返回选票，如果candidate收到的选票占集群节点的大多数，则升级为本次term的leader节点。升级为leader之后向他的follower 发送append entries消息（也就是包含entry消息的心跳），follower也会返回消息的response，系统正常情况下维持在该状态&lt;/p>
-&lt;p>如果选举时，在一个term内发生了两个节点有同样的选票，会在超时过后进入下一轮进行重新选举&lt;/p>
-&lt;h3 id="log-replication">log replication&lt;/h3>
-&lt;p>client的请求只会发往leader。leader收到改动后，将改动写入日志（还未持久化commit），并将改动通过heartbeat广播至follower节点。follower节点写了entry之后（此时还未commit），返回ack。leader收到大于集群节点一半的ack之后，认为已经可以commit了，广播commit的通知。最终集群内所有follower触发commit，向leader返回ack。最后leader认为集群已经达成一致性了，向client返回ack&lt;/p>
-&lt;p>如果集群中产生网络隔离，每个隔离域中会产生一个新的leader，整个集群会存在多个leader。follower少的leader由于获取不到majority ack，他的entry不会被commit。此时client往另一个follower多的leader发送数据改变请求，该隔离域的节点会被commit&lt;/p>
-&lt;p>此时去掉网络隔离后，之前follower少的隔离域内未commit的entry会被刷成之前follower多的隔离域的entry,随后commit，此时集群再次达成一致性&lt;/p></description></item><item><title>etcd client v3 连接流程</title><link>https://scottlx.github.io/posts/etcd-client-v3%E8%BF%9E%E6%8E%A5%E6%B5%81%E7%A8%8B/</link><pubDate>Fri, 28 Oct 2022 09:15:00 +0800</pubDate><guid>https://scottlx.github.io/posts/etcd-client-v3%E8%BF%9E%E6%8E%A5%E6%B5%81%E7%A8%8B/</guid><description>&lt;p>首先需要了解grpc框架的一些概念，这边引用网上的一张图
-&lt;img src="https://scottlx.github.io/img/blobs/etcdclient.png" alt="Alt text">&lt;/p>
-&lt;h3 id="resolver">Resolver&lt;/h3>
-&lt;p>提供一个用户自定义的解析、修改地址的方法，使得用户可以自己去实现地址解析的逻辑、做服务发现、地址更新等等功能。&lt;/p>
-&lt;ol>
-&lt;li>将Endpoints里的ETCD服务器地址(127.0.0.1:2379这种格式)做一次转换传给grpc框架。也可以自己重新写此resolver，做服务发现功能。例如etcd服务器地址写nacos之类的地址，在resolver中写好转换逻辑。&lt;/li>
-&lt;li>调用ClientConn的ParseServiceConfig接口告诉endpoints的负载策略是轮询&lt;/li>
-&lt;/ol>
-&lt;h3 id="balancer">Balancer&lt;/h3>
-&lt;ol>
-&lt;li>管理subConns，并收集各conn信息，更新状态至ClientConn&lt;/li>
-&lt;li>生成picker(balancer)的快照，从而ClientConn可以选择发送rpc请求的subConn&lt;/li>
-&lt;/ol>
-&lt;p>此处etcd client没有实现balancer，默认使用grpc提供的轮询的balancer&lt;/p>
-&lt;h3 id="重试策略">重试策略&lt;/h3>
-&lt;p>与一般的c-s模型不同，etcd client的重试是针对集群的重试。单个节点的断连不会造成所有节点的重连。&lt;/p>
-&lt;h4 id="重试机制">重试机制&lt;/h4>
-&lt;p>一般的重试是对同一个节点进行重试，但etcd client的自动重试不会在ETCD集群的同一节点上进行，是轮询重试集群的每个节点。重试时不会重新建连，而是使用balancer提供的transport。transport的状态更新与这一块的重试是通过balancer解耦的。&lt;/p>
-&lt;h4 id="重试条件">重试条件&lt;/h4>
-&lt;h5 id="etcd-unary拦截器">etcd unary拦截器&lt;/h5>
-&lt;p>拦截器类似http里的中间件的概念，在发送实际请求之前对报文进行篡改。一般用来添加认证，日志记录，缓存之类的功能。&lt;/p>
-&lt;p>此处etcd的一元拦截器主要做了自动重试的功能，且只会重试一些特定的错误(DeadlineExceeded, Canceled,ErrInvalidAuthToken)&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-go" data-lang="go">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#268bd2">func&lt;/span> (c &lt;span style="color:#719e07">*&lt;/span>Client) &lt;span style="color:#268bd2">unaryClientInterceptor&lt;/span>(optFuncs &lt;span style="color:#719e07">...&lt;/span>retryOption) grpc.UnaryClientInterceptor {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> 
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">...&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">if&lt;/span> &lt;span style="color:#268bd2">isContextError&lt;/span>(lastErr) {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#719e07">if&lt;/span> ctx.&lt;span style="color:#268bd2">Err&lt;/span>() &lt;span style="color:#719e07">!=&lt;/span> &lt;span style="color:#cb4b16">nil&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>					&lt;span style="color:#586e75">// its the context deadline or cancellation.&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>					&lt;span style="color:#719e07">return&lt;/span> lastErr
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#586e75">// its the callCtx deadline or cancellation, in which case try again.&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#719e07">continue&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">if&lt;/span> callOpts.retryAuth &lt;span style="color:#719e07">&amp;amp;&amp;amp;&lt;/span> rpctypes.&lt;span style="color:#268bd2">Error&lt;/span>(lastErr) &lt;span style="color:#719e07">==&lt;/span> rpctypes.ErrInvalidAuthToken {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#586e75">// clear auth token before refreshing it.&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#586e75">// call c.Auth.Authenticate with an invalid token will always fail the auth check on the server-side,&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#586e75">// if the server has not apply the patch of pr #12165 (https://github.com/etcd-io/etcd/pull/12165)&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#586e75">// and a rpctypes.ErrInvalidAuthToken will recursively call c.getToken until system run out of resource.&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				c.authTokenBundle.&lt;span style="color:#268bd2">UpdateAuthToken&lt;/span>(&lt;span style="color:#2aa198">&amp;#34;&amp;#34;&lt;/span>)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				gterr &lt;span style="color:#719e07">:=&lt;/span> c.&lt;span style="color:#268bd2">getToken&lt;/span>(ctx)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#719e07">if&lt;/span> gterr &lt;span style="color:#719e07">!=&lt;/span> &lt;span style="color:#cb4b16">nil&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>					c.&lt;span style="color:#268bd2">GetLogger&lt;/span>().&lt;span style="color:#268bd2">Warn&lt;/span>(
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>						&lt;span style="color:#2aa198">&amp;#34;retrying of unary invoker failed to fetch new auth token&amp;#34;&lt;/span>,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>						zap.&lt;span style="color:#268bd2">String&lt;/span>(&lt;span style="color:#2aa198">&amp;#34;target&amp;#34;&lt;/span>, cc.&lt;span style="color:#268bd2">Target&lt;/span>()),
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>						zap.&lt;span style="color:#268bd2">Error&lt;/span>(gterr),
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>					)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>					&lt;span style="color:#719e07">return&lt;/span> gterr &lt;span style="color:#586e75">// lastErr must be invalid auth token&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>				&lt;span style="color:#719e07">continue&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">...&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h4 id="重试次数">重试次数&lt;/h4>
-&lt;p>此处Invoke的大循环里，默认callOpts.max是0，也就是说尝试一次Invoke后就会return错误&lt;/p></description></item><item><title>单调栈</title><link>https://scottlx.github.io/posts/%E5%8D%95%E8%B0%83%E6%A0%88/</link><pubDate>Thu, 13 Oct 2022 10:21:21 +0800</pubDate><guid>https://scottlx.github.io/posts/%E5%8D%95%E8%B0%83%E6%A0%88/</guid><description>&lt;p>由于数据在栈内是单调递增或单调递减的，单调栈适合用来找出数组中第一个大于或小于某个元素的场景。元素出栈后，再根据题意对出栈元素进行处理，更新数据至result。&lt;/p>
-&lt;h4 id="标准模板">标准模板&lt;/h4>
-&lt;ol>
-&lt;li>第一个for循环内循环输入数组，&lt;/li>
-&lt;li>第二个for循环维持栈内单调特性，不满足单调的元素依次出栈&lt;/li>
-&lt;li>第一个for循环内对元素入栈&lt;/li>
-&lt;/ol>
-&lt;h4 id="496-下一个更大元素-i">
-&lt;a href="https://leetcode.cn/problems/next-greater-element-i/" target="_blank" rel="noopener">496. 下一个更大元素 I&lt;/a>&lt;/h4>
-&lt;p>直接输入出栈元素即可&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-go" data-lang="go">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#268bd2">func&lt;/span> &lt;span style="color:#268bd2">nextGreaterElement&lt;/span>(nums1 []&lt;span style="color:#dc322f">int&lt;/span>, nums2 []&lt;span style="color:#dc322f">int&lt;/span>) []&lt;span style="color:#dc322f">int&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">//单调递减栈&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#268bd2">var&lt;/span> stack,res []&lt;span style="color:#dc322f">int&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">//标准模板，首个元素先入栈&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> stack = &lt;span style="color:#b58900">append&lt;/span>(stack, &lt;span style="color:#2aa198">0&lt;/span>)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">//由于只需要输出num1的元素，构造nums1的map作为需要输出数据的查询&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> map1 &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#b58900">make&lt;/span>(&lt;span style="color:#268bd2">map&lt;/span>[&lt;span style="color:#dc322f">int&lt;/span>]&lt;span style="color:#dc322f">int&lt;/span>)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">for&lt;/span> i,v &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#719e07">range&lt;/span>(nums1) {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> map1[v] = i
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">//顺便初始化res，查不到的为-1&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> res = &lt;span style="color:#b58900">append&lt;/span>(res, &lt;span style="color:#719e07">-&lt;/span>&lt;span style="color:#2aa198">1&lt;/span>)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">for&lt;/span> i&lt;span style="color:#719e07">:=&lt;/span>&lt;span style="color:#2aa198">1&lt;/span>; i &amp;lt; &lt;span style="color:#b58900">len&lt;/span>(nums2); i&lt;span style="color:#719e07">++&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// 单调递减，所以&amp;gt;=的都出栈&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">for&lt;/span> &lt;span style="color:#b58900">len&lt;/span>(stack) &amp;gt; &lt;span style="color:#2aa198">0&lt;/span> &lt;span style="color:#719e07">&amp;amp;&amp;amp;&lt;/span> nums2[stack[&lt;span style="color:#b58900">len&lt;/span>(stack)&lt;span style="color:#719e07">-&lt;/span>&lt;span style="color:#2aa198">1&lt;/span>]] &lt;span style="color:#719e07">&amp;lt;=&lt;/span> nums2[i] {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// 查表，需要输出的加入res&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">if&lt;/span> idx, ok &lt;span style="color:#719e07">:=&lt;/span> map1[nums2[stack[&lt;span style="color:#b58900">len&lt;/span>(stack)&lt;span style="color:#719e07">-&lt;/span>&lt;span style="color:#2aa198">1&lt;/span>]]]; ok {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> res[idx] = nums2[i]
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">//pop&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> stack = stack[:&lt;span style="color:#b58900">len&lt;/span>(stack)&lt;span style="color:#719e07">-&lt;/span>&lt;span style="color:#2aa198">1&lt;/span>]
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// push&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> stack = &lt;span style="color:#b58900">append&lt;/span>(stack, i)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">return&lt;/span> res
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h4 id="42-接雨水">
-&lt;a href="https://leetcode.cn/problems/trapping-rain-water/" target="_blank" rel="noopener">42. 接雨水&lt;/a>&lt;/h4>
-&lt;p>出栈后计算出栈元素高度所在层的面积&lt;/p></description></item><item><title>拓扑排序(选课)</title><link>https://scottlx.github.io/posts/%E6%8B%93%E6%89%91%E6%8E%92%E5%BA%8F/</link><pubDate>Wed, 12 Oct 2022 21:42:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E6%8B%93%E6%89%91%E6%8E%92%E5%BA%8F/</guid><description>&lt;p>
-&lt;a href="https://leetcode.cn/problems/course-schedule/" target="_blank" rel="noopener">207. 课程表 - 力扣（LeetCode）&lt;/a>&lt;/p>
-&lt;h2 id="思路">思路&lt;/h2>
-&lt;p>课程之间的依赖关系可以用图来表示&lt;/p>
-&lt;ul>
-&lt;li>顶点：课程&lt;/li>
-&lt;li>边：有向的边，起点是前置课程，终点是后置课程&lt;/li>
-&lt;/ul>
-&lt;p>这种图叫做AOV（Activity On Vertex）网络，字面意思就是边代表了节点之间的活动的先后关系。&lt;/p>
-&lt;p>按照题意，这个图是无环的（课程不能循环依赖），也就是DAG图。DAG图其实就是一颗树，只不过根节点是一个虚拟根节点（可以有多个起始根节点，但外面可以用一个虚拟根节点作为他们的父节点）。&lt;/p>
-&lt;p>因此，可以用广度优先遍历（BFS）来求解。队列存放可以选的课程（入度为0），依次出队列（选课）。直到队列为空（没有课可以选了），看是否已经学完所有的课程&lt;/p>
-&lt;ul>
-&lt;li>入度：指向自己的边的数量，入度为0表示自己没有前置课程，可以入队列&lt;/li>
-&lt;li>出度：指向别人的边。用一个数据结构记录每个节点的出度列表。当某个节点出队列时，更新本节点的出度列表里所有节点的入度（-1）&lt;/li>
-&lt;/ul>
-&lt;h2 id="代码">代码&lt;/h2>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-go" data-lang="go">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#268bd2">func&lt;/span> &lt;span style="color:#268bd2">canFinish&lt;/span>(numCourses &lt;span style="color:#dc322f">int&lt;/span>, prerequisites [][]&lt;span style="color:#dc322f">int&lt;/span>) &lt;span style="color:#dc322f">bool&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">//保存各课程的入度 空间O(v)&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> indegree &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#b58900">make&lt;/span>([]&lt;span style="color:#dc322f">int&lt;/span>, numCourses)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// 保存各课程的出度列表 空间O(e)&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> courseMp &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#b58900">make&lt;/span>(&lt;span style="color:#268bd2">map&lt;/span>[&lt;span style="color:#dc322f">int&lt;/span>][]&lt;span style="color:#dc322f">int&lt;/span>)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">//时间 O(e)&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">for&lt;/span> _, pre &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#719e07">range&lt;/span>(prerequisites) {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> indegree[pre[&lt;span style="color:#2aa198">0&lt;/span>]]&lt;span style="color:#719e07">++&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> courseMp[pre[&lt;span style="color:#2aa198">1&lt;/span>]] = &lt;span style="color:#b58900">append&lt;/span>(courseMp[pre[&lt;span style="color:#2aa198">1&lt;/span>]], pre[&lt;span style="color:#2aa198">0&lt;/span>])
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#268bd2">var&lt;/span> q []&lt;span style="color:#dc322f">int&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// 已经学习了的课程的计数&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#268bd2">var&lt;/span> num &lt;span style="color:#dc322f">int&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// 初始入度为0的课程加入队列&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">for&lt;/span> course, depends &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#719e07">range&lt;/span>(indegree) {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">if&lt;/span> depends &lt;span style="color:#719e07">==&lt;/span> &lt;span style="color:#2aa198">0&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> q = &lt;span style="color:#b58900">append&lt;/span>(q, course)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">//循环直到队列为空 时间O(v)&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">for&lt;/span> &lt;span style="color:#b58900">len&lt;/span>(q) &amp;gt; &lt;span style="color:#2aa198">0&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// 出队列&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> finished &lt;span style="color:#719e07">:=&lt;/span> q[&lt;span style="color:#2aa198">0&lt;/span>]
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> q = q[&lt;span style="color:#2aa198">1&lt;/span>:]
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> num&lt;span style="color:#719e07">++&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// 更新入度数据结构(slice)&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// 从出度课程列表中直接取受影响的课程&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">for&lt;/span> _, course &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#719e07">range&lt;/span>(courseMp[finished]) {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> indegree[course]&lt;span style="color:#719e07">--&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// 入度-1后若为0，则可以入队列&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">if&lt;/span> indegree[course] &lt;span style="color:#719e07">==&lt;/span> &lt;span style="color:#2aa198">0&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> q = &lt;span style="color:#b58900">append&lt;/span>(q, course)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">//是否学完&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">return&lt;/span> num &lt;span style="color:#719e07">==&lt;/span> numCourses
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;ul>
-&lt;li>时间复杂度：O (v+e)&lt;/li>
-&lt;li>空间复杂度: O(v+e)&lt;/li>
-&lt;/ul>
-&lt;p>若需要省空间，不需要省时间，可以不使用courseMp存放出度数组，每次重新遍历prerequisites 获取出度数组。此时处理每个节点都需要重新遍历所有的边，因此：&lt;/p></description></item><item><title>优势洗牌(田忌赛马)</title><link>https://scottlx.github.io/posts/%E4%BC%98%E5%8A%BF%E6%B4%97%E7%89%8C%E7%94%B0%E5%BF%8C%E8%B5%9B%E9%A9%AC/</link><pubDate>Sat, 08 Oct 2022 10:36:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E4%BC%98%E5%8A%BF%E6%B4%97%E7%89%8C%E7%94%B0%E5%BF%8C%E8%B5%9B%E9%A9%AC/</guid><description>&lt;p>
-&lt;a href="https://leetcode.cn/problems/advantage-shuffle/" target="_blank" rel="noopener">870. 优势洗牌 - 力扣（LeetCode）&lt;/a>&lt;/p>
-&lt;h3 id="思路">思路&lt;/h3>
-&lt;ol>
-&lt;li>将nums1(自己的马)进行升序排序，得到下等马-&amp;gt;上等马的序列&lt;/li>
-&lt;li>贪心策略
-&lt;ul>
-&lt;li>若某个位置上自己的马比对手的马强，由于已经排过序了，已经是最下等的马了，因此使用这匹马&lt;/li>
-&lt;li>若某个位置上自己的马比对手的马弱，将该下等马放到最后的位置（对手的上等马的位置）&lt;/li>
-&lt;/ul>
-&lt;/li>
-&lt;li>由于nums2的顺序固定（已知对手上场顺序），因此使用nums2的元素值对nums2的index进行排序，得到上场顺序（ids）&lt;/li>
-&lt;li>按照上场顺序(ids)依次写入ans数组中&lt;/li>
-&lt;/ol>
-&lt;h3 id="代码">代码&lt;/h3>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-go" data-lang="go">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#268bd2">func&lt;/span> &lt;span style="color:#268bd2">advantageCount&lt;/span>(nums1 []&lt;span style="color:#dc322f">int&lt;/span>, nums2 []&lt;span style="color:#dc322f">int&lt;/span>) []&lt;span style="color:#dc322f">int&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	sort.&lt;span style="color:#268bd2">Ints&lt;/span>(nums1)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	n &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#b58900">len&lt;/span>(nums1)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	ans &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#b58900">make&lt;/span>([]&lt;span style="color:#dc322f">int&lt;/span>, n)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	ids &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#b58900">make&lt;/span>([]&lt;span style="color:#dc322f">int&lt;/span>, n)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">for&lt;/span> i &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#2aa198">0&lt;/span>; i &amp;lt; n; i&lt;span style="color:#719e07">++&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		ids[i] = i
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	sort.&lt;span style="color:#268bd2">Slice&lt;/span>(ids, &lt;span style="color:#268bd2">func&lt;/span>(i, j &lt;span style="color:#dc322f">int&lt;/span>) &lt;span style="color:#dc322f">bool&lt;/span> { &lt;span style="color:#719e07">return&lt;/span> nums2[ids[i]] &amp;lt; nums2[ids[j]] })
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	left, right &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#2aa198">0&lt;/span>, n&lt;span style="color:#719e07">-&lt;/span>&lt;span style="color:#2aa198">1&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">for&lt;/span> _, v &lt;span style="color:#719e07">:=&lt;/span> &lt;span style="color:#719e07">range&lt;/span> nums1 {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">if&lt;/span> v &amp;gt; nums2[ids[left]] {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			ans[ids[left]] = v
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			left&lt;span style="color:#719e07">++&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		} &lt;span style="color:#719e07">else&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			ans[ids[right]] = v
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			right&lt;span style="color:#719e07">--&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">return&lt;/span> ans
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h3 id="总结">总结&lt;/h3>
-&lt;p>灵活运用不对数组进行真正的排序，而是获得排序后的index的顺序这一技巧&lt;/p></description></item><item><title>k8s源码分析</title><link>https://scottlx.github.io/posts/k8s%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90/</link><pubDate>Mon, 03 Oct 2022 16:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/k8s%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90/</guid><description>&lt;h3 id="api-server">API Server&lt;/h3>
-&lt;p>&lt;img src="https://scottlx.github.io/img/k8s/APIServer.svg" alt="APIServer">&lt;/p>
-&lt;h3 id="controller">Controller&lt;/h3>
-&lt;p>&lt;img src="https://scottlx.github.io/img/k8s/controller.svg" alt="controller">&lt;/p>
-&lt;h3 id="device-plugin">Device Plugin&lt;/h3>
-&lt;p>&lt;img src="https://scottlx.github.io/img/k8s/device_plugin.svg" alt="device_plugin">&lt;/p>
-&lt;h3 id="informer">Informer&lt;/h3>
-&lt;p>&lt;img src="https://scottlx.github.io/img/k8s/informer.svg" alt="informer">&lt;/p>
-&lt;h3 id="kube-proxy">Kube Proxy&lt;/h3>
-&lt;p>&lt;img src="https://scottlx.github.io/img/k8s/kubeproxy.svg" alt="kubeproxy">&lt;/p>
-&lt;h3 id="pod-create">Pod Create&lt;/h3>
-&lt;p>&lt;img src="https://scottlx.github.io/img/k8s/pod-create.svg" alt="pod create">&lt;/p>
-&lt;h3 id="schdulerv113">Schduler(V1.13)&lt;/h3>
-&lt;p>&lt;img src="https://scottlx.github.io/img/k8s/schedulerv1.13.svg" alt="schedulerv1.13">&lt;/p></description></item><item><title>redis Server</title><link>https://scottlx.github.io/posts/redisserver/</link><pubDate>Mon, 03 Oct 2022 15:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/redisserver/</guid><description>&lt;h3 id="数据库切换">数据库切换&lt;/h3>
-&lt;p>默认会创建16个数据库，客户端通过select选取。但一般情况只用第0个数据库，切换容易导致误操作&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">typedef&lt;/span> &lt;span style="color:#719e07">struct&lt;/span> redisDb {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> dict &lt;span style="color:#719e07">*&lt;/span>dict; &lt;span style="color:#586e75">//键空间
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> dict &lt;span style="color:#719e07">*&lt;/span>expires; &lt;span style="color:#586e75">//过期字典
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">int&lt;/span> id;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>} redisDb;
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>所有键空间存储在redisDb的dict中，称为key space&lt;/p>
-&lt;p>每个键是字符串对象，值是各种对象&lt;/p>
-&lt;h3 id="读写键操作">读写键操作&lt;/h3>
-&lt;ol>
-&lt;li>更新keyspace_hits和keyspace_misses，用来输出统计数据&lt;/li>
-&lt;li>更新键的LRU时间&lt;/li>
-&lt;li>若发现该键已经过期，则删除键&lt;/li>
-&lt;li>若该键被watch，标记键为dirty，使得监听者发现后重新拉数据&lt;/li>
-&lt;li>dirty计数器++，用来触发持久化和复制操作&lt;/li>
-&lt;/ol>
-&lt;p>过期字典的键是键空间的键字符串对象的指针（不会新分配空间），值是longlong类型的过期时间（毫秒精度的unix时间戳）&lt;/p>
-&lt;p>判断是否过期：&lt;/p>
-&lt;p>先在过期字典里取key的过期时间，再与当前时间比较&lt;/p>
-&lt;h3 id="删除策略">删除策略&lt;/h3>
-&lt;p>（redis同时采用惰性删除和定期删除策略，其中定期删除是随机取出一定数量的键做检查）：&lt;/p>
-&lt;ul>
-&lt;li>定时删除：过期时立刻删除（问题：要创建大量定时器，占用太多CPU，因此不合理）&lt;/li>
-&lt;li>惰性删除：获取键时若过期才删除 （问题：内存最不友好）&lt;/li>
-&lt;li>定期删除：定期对所有key进行检查并删除 （问题：如何确定定期时间，太快或太慢都不好）&lt;/li>
-&lt;/ul>
-&lt;h3 id="持久化">持久化&lt;/h3>
-&lt;p>
-&lt;a href="https://www.cnblogs.com/justjavac/archive/2013/01/22/redis-persistence-demystified.html" target="_blank" rel="noopener">解密Redis持久化 - justjavac - 博客园 (cnblogs.com)&lt;/a>&lt;/p>
-&lt;h4 id="rdb">rdb&lt;/h4>
-&lt;p>记录键值&lt;/p>
-&lt;p>主服务器初始化加载时不会加载过期的键值，从服务器会加载过期的键值，但同步之后也会被清空掉&lt;/p>
-&lt;p>主节点统一管理过期删除，从节点只能被动接收del命令，保证了数据一致性，但从节点里可能会有过期键值&lt;/p>
-&lt;p>SAVE阻塞保存，BGSAVE用子进程保存&lt;/p>
-&lt;p>自动保存：自动保存规则设置在一个列表中，表示一段时间内进行了多少次改动就满足保存规则&lt;/p>
-&lt;p>每次写入会将db的dirty计数器加1，且每次保存会保存的时间戳lastsave。当距离lastsave的时间超过条件中设置的时间，比较dirty与规则中设置的改动次数，若满足则触发BGSAVE&lt;/p>
-&lt;p>RDB数据格式&lt;/p>
-&lt;table>
- &lt;thead>
- &lt;tr>
- &lt;th>REDIS&lt;/th>
- &lt;th>db_version&lt;/th>
- &lt;th>database 0&lt;/th>
- &lt;th>database 3&lt;/th>
- &lt;th>EOF&lt;/th>
- &lt;th>check_sum&lt;/th>
- &lt;/tr>
- &lt;/thead>
- &lt;tbody>
- &lt;tr>
- &lt;td>&lt;/td>
- &lt;td>&lt;/td>
- &lt;td>&lt;/td>
- &lt;td>&lt;/td>
- &lt;td>&lt;/td>
- &lt;td>&lt;/td>
- &lt;/tr>
- &lt;/tbody>
-&lt;/table>
-&lt;p>格式细节包括压缩算法略过&lt;/p>
-&lt;h4 id="aof">aof&lt;/h4>
-&lt;p>记录写命令（启动时优先选择加载aof）&lt;/p>
-&lt;p>命令追加：按redis协议追加到aof_buf缓冲区中&lt;/p>
-&lt;p>文件写入和同步：redis server主线程每次循环结束前，将缓冲区写入aof文件，并调用fsync落盘&lt;/p></description></item><item><title>redis 多节点</title><link>https://scottlx.github.io/posts/redis%E5%A4%9A%E8%8A%82%E7%82%B9/</link><pubDate>Mon, 03 Oct 2022 15:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/redis%E5%A4%9A%E8%8A%82%E7%82%B9/</guid><description>&lt;h1 id="主从复制">主从（复制）&lt;/h1>
-&lt;h2 id="同步">同步&lt;/h2>
-&lt;p>slave刚上线或断线重连时的第一次全量同步&lt;/p>
-&lt;p>slave的客户端主动发送sync命令，触发master的BGSAVE，BGSAVE过程中将命令存入缓冲区，BGSAVE完成后发送RDB文件，slave完成RDB载入后再发送缓冲区的指令&lt;/p>
-&lt;h2 id="命令传播">命令传播&lt;/h2>
-&lt;p>完成同步后的增量同步&lt;/p>
-&lt;p>master主动发送命令&lt;/p>
-&lt;h2 id="psync">psync&lt;/h2>
-&lt;p>优化后的sync，作为断线重连后的增量同步
-slave发送psync命令，master返回+continue，之后发送断开期间执行的写命令&lt;/p>
-&lt;h3 id="偏移量">偏移量&lt;/h3>
-&lt;p>主节点和从节点各自维护一个偏移量，表示当前已接收数据的字节数。当从节点发现自身偏移量与主节点不一致时，主动向主节点发送psync命令&lt;/p>
-&lt;h3 id="复制缓冲区">复制缓冲区&lt;/h3>
-&lt;p>主节点进行命令传播时(增量同步),会将写命令复制一份到缓冲区。且每个写命令都绑定一个对应的偏移量。从节点发送的psync中带有偏移量，
-通过该偏移量在复制缓冲区中查找偏移量之后的写命令。如果查不到，则执行完整同步(sync)&lt;/p>
-&lt;h3 id="服务器运行id">服务器运行ID&lt;/h3>
-&lt;p>从节点向主节点注册自己的分布式ID，新上线的从节点若不在注册表内，则进行完整同步(sync)，否则进行部分重同步。&lt;/p>
-&lt;h2 id="同步过程">同步过程&lt;/h2>
-&lt;p>slaveof命令设置redisServer中的masterhost和masterport字段，之后主从连接由cron定时器任务里触发&lt;/p>
-&lt;ul>
-&lt;li>anetTcpConnect建立一个新的tcp连接&lt;/li>
-&lt;li>ping-pong命令测试连接&lt;/li>
-&lt;li>auth鉴权&lt;/li>
-&lt;li>发送端口号，主节点刷新client信息&lt;/li>
-&lt;li>psyn/sync 同步&lt;/li>
-&lt;li>命令传播&lt;/li>
-&lt;li>心跳 发送REPLCONF ACK命令，其中带有从节点的偏移量，可以检测命令丢失（命令丢失后主节点和从节点的偏移量会不一样）；收到心跳的时间戳用来监测网络延迟状态，若一定数量的从服务器的lag超过一定值，表示该主从集合不健康，不允许client写入&lt;/li>
-&lt;/ul>
-&lt;h3 id="一致性">一致性&lt;/h3>
-&lt;p>不是强一致性（cap），是最终一致性。用最终一致性换取了高吞吐量&lt;/p>
-&lt;ul>
-&lt;li>master与slave的同步存在数据不一致的时间窗口期&lt;/li>
-&lt;li>网络分区后哨兵模式或者集群模式的选主会产生脑裂&lt;/li>
-&lt;/ul>
-&lt;h1 id="哨兵">哨兵&lt;/h1>
-&lt;p>多了一个哨兵节点进行主节点选举，触发从同步等工作，数据的同步还是主从模式
-哨兵节点运行的是一个特殊模式的redis服务器，里面没有数据库。&lt;/p>
-&lt;h3 id="连接类型">连接类型&lt;/h3>
-&lt;p>命令连接&lt;/p>
-&lt;p>订阅连接&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">/*实例不是 Sentinel （主服务器或者从服务器）
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">并且以下条件的其中一个成立：
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75"> 1）SENTINEL 未收到过这个服务器的 INFO 命令回复
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75"> 2）距离上一次该实例回复 INFO 命令已经超过 info_period 间隔
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75"> 那么向实例发送 INFO 命令
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">*/&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">if&lt;/span> ((ri&lt;span style="color:#719e07">-&amp;gt;&lt;/span>flags &lt;span style="color:#719e07">&amp;amp;&lt;/span> SRI_SENTINEL) &lt;span style="color:#719e07">==&lt;/span> &lt;span style="color:#2aa198">0&lt;/span> &lt;span style="color:#719e07">&amp;amp;&amp;amp;&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>​ (ri&lt;span style="color:#719e07">-&amp;gt;&lt;/span>info_refresh &lt;span style="color:#719e07">==&lt;/span> &lt;span style="color:#2aa198">0&lt;/span> &lt;span style="color:#719e07">||&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>​ (now &lt;span style="color:#719e07">-&lt;/span> ri&lt;span style="color:#719e07">-&amp;gt;&lt;/span>info_refresh) &lt;span style="color:#719e07">&amp;gt;&lt;/span> info_period))
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>​ &lt;span style="color:#586e75">/* Send INFO to masters and slaves, not sentinels. */&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>​ retval &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#268bd2">redisAsyncCommand&lt;/span>(ri&lt;span style="color:#719e07">-&amp;gt;&lt;/span>cc,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>​ sentinelInfoReplyCallback, &lt;span style="color:#b58900">NULL&lt;/span>, &lt;span style="color:#2aa198">&amp;#34;INFO&amp;#34;&lt;/span>);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>​ &lt;span style="color:#719e07">if&lt;/span> (retval &lt;span style="color:#719e07">==&lt;/span> REDIS_OK) ri&lt;span style="color:#719e07">-&amp;gt;&lt;/span>pending_commands&lt;span style="color:#719e07">++&lt;/span>;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> } &lt;span style="color:#719e07">else&lt;/span> &lt;span style="color:#719e07">if&lt;/span> ((now &lt;span style="color:#719e07">-&lt;/span> ri&lt;span style="color:#719e07">-&amp;gt;&lt;/span>last_pong_time) &lt;span style="color:#719e07">&amp;gt;&lt;/span> ping_period) {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>​ &lt;span style="color:#586e75">/* Send PING to all the three kinds of instances. */&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>​ &lt;span style="color:#268bd2">sentinelSendPing&lt;/span>(ri);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> } &lt;span style="color:#719e07">else&lt;/span> &lt;span style="color:#719e07">if&lt;/span> ((now &lt;span style="color:#719e07">-&lt;/span> ri&lt;span style="color:#719e07">-&amp;gt;&lt;/span>last_pub_time) &lt;span style="color:#719e07">&amp;gt;&lt;/span> SENTINEL_PUBLISH_PERIOD) {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>​ &lt;span style="color:#586e75">/* PUBLISH hello messages to all the three kinds of instances. */&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>​ &lt;span style="color:#268bd2">sentinelSendHello&lt;/span>(ri);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h3 id="节点的连接">节点的连接&lt;/h3>
-&lt;p>哨兵主定时任务开始时，以1s或10s的间隔发送INFO命令，得到主节点的回复，并处理INFO回复的信息。回复中包含该主节点的从节点ip+port。处理函数中更新主节点的实例sentinelRedisInstance，并创建从节点，进行从节点的连接，获取从节点的详细信息。&lt;/p></description></item><item><title>redis 数据结构</title><link>https://scottlx.github.io/posts/redis%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84/</link><pubDate>Mon, 03 Oct 2022 15:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/redis%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84/</guid><description>&lt;p>此系列作为redis设计与实现的笔记，会将本人自认为重点部分单独拎出来，并加入本人的一些理解。&lt;/p>
-&lt;h3 id="sds">SDS&lt;/h3>
-&lt;p>（simple dynamic string）&lt;/p>
-&lt;p>等同于go里的slice&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">struct&lt;/span> sdshdr {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#dc322f">int&lt;/span> len;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#dc322f">int&lt;/span> free;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#dc322f">char&lt;/span> buf[];
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>优点：&lt;/p>
-&lt;ul>
-&lt;li>杜绝缓冲区溢出（free检验）&lt;/li>
-&lt;li>减少修改字符串时的内存分配次数（策略：小于1MB时，len=free，大于1MB时，free=1MB）&lt;/li>
-&lt;li>惰性空间释放（删除时实际空间并未缩减）&lt;/li>
-&lt;li>二进制安全（C字符串视/0为结束，不能用来存带/0的二进制数据）&lt;/li>
-&lt;li>部分兼容C字符串函数（默认在char数组最后加入/0，来兼容C字符串函数）&lt;/li>
-&lt;/ul>
-&lt;h3 id="链表">链表&lt;/h3>
-&lt;p>双向链表，无环，保存头指针和尾指针，保存链表长度字段，链表节点的数据为void*指针&lt;/p>
-&lt;h3 id="字典">字典&lt;/h3>
-&lt;p>字典有type，每个type实现了一系列操作kv的函数（对比，生成哈希，删除，复制等）&lt;/p>
-&lt;p>每个字典存有两个哈希表，一般用第一个ht[0]，第二个ht[1]用作rehash时的暂存容器&lt;/p>
-&lt;p>哈希表由数组实现，数组存放kv链表头节点，链地址法解决冲突，冲突的新键值往表头加（由于没有指向表尾的指针）&lt;/p>
-&lt;p>rehash标志位，当没有进行rehash时为-1&lt;/p>
-&lt;p>key&amp;ndash;&amp;gt;(hashfunc)&amp;ndash;&amp;gt;hash&amp;ndash;&amp;gt;(hashmask)&amp;ndash;&amp;gt;index&lt;/p>
-&lt;p>murmurhash算法：输入有规律情况还是能生成随机分布性的hash&lt;/p>
-&lt;h4 id="rehash">rehash&lt;/h4>
-&lt;p>为ht[1]哈希表分配空间，空间的大小取决于当前ht[0]包含的键值数量以及要进行的操作，重新计算所有键值在ht[1]的索引并插入，插入后将ht[1]设置为ht[0]，并ht[1]指向新创的空白hash表&lt;/p>
-&lt;p>负载因子=ht[0].used/ht[0].size&lt;/p>
-&lt;h5 id="何时进行扩展">何时进行扩展?&lt;/h5>
-&lt;p>在进行持久化操作时(BGSAVE,BGREWRITEAOF)，负载因子&amp;gt;=5，普通场景下负载因子&amp;gt;=1&lt;/p>
-&lt;h5 id="何时进行收缩">何时进行收缩?&lt;/h5>
-&lt;p>负载因子&amp;lt;0.1&lt;/p>
-&lt;h5 id="渐进式rehash">渐进式rehash&lt;/h5>
-&lt;p>开始时rehashidx为0，表示正在进行rehash，rehash期间对字典的CRUD会顺带将ht[0]上的KV rehash到ht[1]，完成后rehashidx置为-1,表示已经完成。rehash期间的CRUD会先在ht[0]上查，查不到再去ht[1]查&lt;/p>
-&lt;h3 id="跳表">跳表&lt;/h3>
-&lt;p>用来实现有序集合键，用作集群节点内部数据结构&lt;/p>
-&lt;p>优点，相较于平衡树，实现简单，且rebalance的效率高（局部rebalance，只修改搜索路径上的节点）&lt;/p>
-&lt;p>链表的扩展，维护了多个指向其他节点的指针，类似二分查找&lt;/p>
-&lt;p>每个节点的层数是随机生成的，遍历时先走最上层的前进指针，若下一条节点的分值比要查找的分值高，则通过回退指针回到原来的节点并走下一层的前进指针，以此类推&lt;/p>
-&lt;p>前进指针中存有跨度，累加所有跨度，当找到该节点后作为该节点在跳表中的排位（数组的index）&lt;/p>
-&lt;p>比较分值时，分值可能相同，相同时比较value值（obj指向的sds的字典序）&lt;/p>
-&lt;p>节点更新时，若score的改变未影响排序，则查找并直接改score，否则进行先删除后插入操作，会进行两次路径搜索&lt;/p>
-&lt;h3 id="整数集合">整数集合&lt;/h3>
-&lt;p>底层保存的整数为byte数组(int8)，按照解码类型(encoding)存入int16，int32或int64的数据&lt;/p>
-&lt;p>只能存一种类型的数据，短int集合中插入长int后，往长int类型兼容（升级）&lt;/p>
-&lt;p>节约内存，int16不需要分配int64的空间&lt;/p>
-&lt;p>自适应灵活性，集合中添加长度更长的新元素，会自动升级，但不支持降级&lt;/p>
-&lt;h3 id="压缩列表">压缩列表&lt;/h3>
-&lt;p>为了节约内存，将键值为小整数值和短字符串的entry按照特殊编排压缩为一段内存块&lt;/p>
-&lt;p>先略过&lt;/p>
-&lt;h3 id="对象">对象&lt;/h3>
-&lt;p>创建键值对时，键和值都被封装成对象，并指明对象的类型，编码以及底层数据结构的指针&lt;/p>
-&lt;p>key总是字符串对象，value可以是字符串对象，列表对象，哈希对象，集合对象，有序集合对象(zset)&lt;/p>
-&lt;p>编码指定了底层数据结构, 每种对象类型有多种编码的实现&lt;/p>
-&lt;h4 id="字符串对象">字符串对象&lt;/h4>
-&lt;p>long：value是数字，可以用long存&lt;/p>
-&lt;p>raw：value是字符串，长度大于32byte，用sds存，sds的内存是另外一块，和redisObject不连续&lt;/p>
-&lt;p>embstr：value是字符串，长度小于32byte，用sds存，sds的内存与redisObject的内存连续 （好处：减少分配和释放内存的次数，增加缓存命中率；坏处：没有实现写方法，只读，修改的话需要先转raw）&lt;/p></description></item><item><title>gobpf不完整使用指南</title><link>https://scottlx.github.io/posts/gobpf/</link><pubDate>Mon, 03 Oct 2022 14:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/gobpf/</guid><description>&lt;h3 id="编译过程">编译过程&lt;/h3>
-&lt;h4 id="安装llvm-10clang-10">安装llvm-10,clang-10&lt;/h4>
-&lt;p>apt-install llvm-10 clang-10&lt;/p>
-&lt;h4 id="下载bpf2go">下载bpf2go&lt;/h4>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-shell" data-lang="shell">&lt;span style="display:flex;">&lt;span>go install github.com/cilium/ebpf/cmd/bpf2go@latest
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>修改bpf程序的include&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#include&lt;/span> &lt;span style="color:#719e07">&amp;#34;common.h&amp;#34;&lt;/span>&lt;span style="color:#719e07">
-&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h4 id="编译时将bpd的headers包含进来">编译时将bpd的headers包含进来&lt;/h4>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-shell" data-lang="shell">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#268bd2">GOPACKAGE&lt;/span>&lt;span style="color:#719e07">=&lt;/span>main bpf2go -cc clang-10 -cflags &lt;span style="color:#2aa198">&amp;#39;-O2 -g -Wall -Werror&amp;#39;&lt;/span> -target bpfel,bpfeb bpf helloworld.bpf.c -- -I /root/ebpf/examples/headers
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>得到大端和小端两个版本的ELF文件，之后在go程序里加载即可。cpu一般都是小端。&lt;/p>
-&lt;h3 id="内核版本要求">内核版本要求&lt;/h3>
-&lt;p>经测试一些gobpf的一些syscall不适配较低版本的内核（例如5.8的BPF_LINK_CREATE会报参数错误），建议使用最新版本内核5.19&lt;/p>
-&lt;h3 id="bpf_map">bpf_map&lt;/h3>
-&lt;p>用户态程序首先加载bpf maps，再将bpf maps绑定到fd上。elf文件中的realocation table用来将代码中的bpf maps重定向至正确的fd上,用户程序在fd上发起bpf syscall&lt;/p>
-&lt;p>map的value尽量不要存复合数据结构，若bpf程序和用户态程序共用一个头文件，用户态程序调用bpf.Lookup时由于结构体变量unexported而反射失败&lt;/p>
-&lt;h3 id="pinning-object">pinning object&lt;/h3>
-&lt;p>将map挂载到/sys/fs/bpf&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-go" data-lang="go">&lt;span style="display:flex;">&lt;span>ebpf.CollectionOptions{
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> Maps: ebpf.MapOptions{
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// Pin the map to the BPF filesystem and configure the&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// library to automatically re-write it in the BPF&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// program so it can be re-used if it already exists or&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// create it if not&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> PinPath: pinPath
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>其他用户态程序获取pinned map的fd&lt;/p></description></item><item><title>初识ebpf</title><link>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86ebpf/</link><pubDate>Mon, 03 Oct 2022 14:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86ebpf/</guid><description>&lt;p>摘自&lt;/p>
-&lt;p>
-&lt;a href="https://forsworns.github.io/zh/blogs/20210329/" target="_blank" rel="noopener">eBPF 用户空间虚拟机实现相关 | Blog (forsworns.github.io)&lt;/a>&lt;/p>
-&lt;p>[
-&lt;a href="http://arthurchiao.art/blog/cilium-bpf-xdp-reference-guide-zh/" target="_blank" rel="noopener">译] Cilium：BPF 和 XDP 参考指南（2021） (arthurchiao.art)&lt;/a>&lt;/p>
-&lt;h3 id="hook-point">hook point&lt;/h3>
-&lt;p>可以插入bpf代码的位置&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">enum&lt;/span> bpf_prog_type {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_UNSPEC,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_SOCKET_FILTER,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_KPROBE,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_SCHED_CLS,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_SCHED_ACT,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_TRACEPOINT,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_XDP,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_PERF_EVENT,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_CGROUP_SKB,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_CGROUP_SOCK,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_LWT_IN,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_LWT_OUT,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_LWT_XMIT,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_SOCK_OPS,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_SK_SKB,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>};
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h3 id="程序类型">程序类型&lt;/h3>
-&lt;table>
- &lt;thead>
- &lt;tr>
- &lt;th>&lt;strong>bpf_prog_type&lt;/strong>&lt;/th>
- &lt;th>&lt;strong>BPF prog&lt;/strong> 入口参数（R1)&lt;/th>
- &lt;th>&lt;strong>程序类型&lt;/strong>&lt;/th>
- &lt;/tr>
- &lt;/thead>
- &lt;tbody>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_SOCKET_FILTER&lt;/strong>&lt;/td>
- &lt;td>&lt;strong>struct __sk_buff&lt;/strong>&lt;/td>
- &lt;td>用于过滤进出口网络报文，功能上和 cBPF 类似。&lt;/td>
- &lt;/tr>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_KPROBE&lt;/strong>&lt;/td>
- &lt;td>&lt;strong>struct&lt;/strong> &lt;strong>pt_regs&lt;/strong>&lt;/td>
- &lt;td>用于 kprobe 功能的 BPF 代码。&lt;/td>
- &lt;/tr>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_TRACEPOINT&lt;/strong>&lt;/td>
- &lt;td>这类 BPF 的参数比较特殊，根据 tracepoint 位置的不同而不同。&lt;/td>
- &lt;td>用于在各个 tracepoint 节点运行。&lt;/td>
- &lt;/tr>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_XDP&lt;/strong>&lt;/td>
- &lt;td>&lt;strong>struct&lt;/strong> &lt;strong>xdp_md&lt;/strong>&lt;/td>
- &lt;td>用于控制 XDP(eXtreme Data Path)的 BPF 代码。&lt;/td>
- &lt;/tr>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_PERF_EVENT&lt;/strong>&lt;/td>
- &lt;td>&lt;strong>struct bpf_perf_event_data&lt;/strong>&lt;/td>
- &lt;td>用于定义 perf event 发生时回调的 BPF 代码。&lt;/td>
- &lt;/tr>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_CGROUP_SKB&lt;/strong>&lt;/td>
- &lt;td>&lt;strong>struct __sk_buff&lt;/strong>&lt;/td>
- &lt;td>用于在 network cgroup 中运行的 BPF 代码。功能上和 Socket_Filter 近似。具体用法可以参考范例 test_cgrp2_attach。&lt;/td>
- &lt;/tr>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_CGROUP_SOCK&lt;/strong>&lt;/td>
- &lt;td>&lt;strong>struct bpf_sock&lt;/strong>&lt;/td>
- &lt;td>另一个用于在 network cgroup 中运行的 BPF 代码，范例 test_cgrp2_sock2 中就展示了一个利用 BPF 来控制 host 和 netns 间通信的例子。&lt;/td>
- &lt;/tr>
- &lt;/tbody>
-&lt;/table>
-&lt;p>BPF 程序类型就是由 BPF side 的代码的函数参数确定的，比如写了一个函数，参数是 &lt;code>struct __sk_buff&lt;/code> 类型的，它就是一个 &lt;strong>BPF_PROG_TYPE_SOCKET_FILTER&lt;/strong> 类型的 BPF 程序&lt;/p></description></item><item><title>基于事务处理的vpp管控面agent</title><link>https://scottlx.github.io/posts/%E5%9F%BA%E4%BA%8E%E4%BA%8B%E5%8A%A1%E5%A4%84%E7%90%86%E7%9A%84vpp%E7%AE%A1%E6%8E%A7%E9%9D%A2agent/</link><pubDate>Mon, 03 Oct 2022 13:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E5%9F%BA%E4%BA%8E%E4%BA%8B%E5%8A%A1%E5%A4%84%E7%90%86%E7%9A%84vpp%E7%AE%A1%E6%8E%A7%E9%9D%A2agent/</guid><description>&lt;h3 id="问题背景">问题背景&lt;/h3>
-&lt;p>vpp作为vrouter，类似物理交换机，各配置项依赖关系复杂。以下为vpp配置abf策略路由的例子：&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">typedef&lt;/span> abf_policy
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>{
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> u32 policy_id;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> u32 acl_index; &lt;span style="color:#586e75">//依赖acl
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> u8 n_paths;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">vl_api_fib_path_t&lt;/span> paths[n_paths];
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>};
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>autoreply define abf_policy_add_del
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>{
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> option status&lt;span style="color:#719e07">=&lt;/span>&lt;span style="color:#2aa198">&amp;#34;in_progress&amp;#34;&lt;/span>;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> u32 client_index;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> u32 context;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">bool&lt;/span> is_add;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">vl_api_abf_policy_t&lt;/span> policy;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>};
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">typedef&lt;/span> abf_itf_attach
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>{
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> u32 policy_id;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">vl_api_interface_index_t&lt;/span> sw_if_index; &lt;span style="color:#586e75">//依赖interface，interface又会依赖其他资源
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> u32 priority;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#dc322f">bool&lt;/span> is_ipv6;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>};
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>可以看到，策略路由首先依赖acl规则，之后将abf绑定至接口时需要依赖对应interface的index，且创建interface又需要依赖其他资源（绑定vrf等）。&lt;/p>
-&lt;p>除此之外，vpp配置写入存在中间状态与崩溃的问题，且无法避免。“崩溃”类似数据库写入的概念。数据必须要成功写入磁盘、磁带等持久化存储器后才能拥有持久性，只存储在，内存中的数据，一旦遇到应用程序忽然崩溃，或者数据库、操作系统一侧的崩溃，甚至是机器突然断电宕机等情况就会丢失，这些意外情况都统称为“崩溃”。&lt;/p>
-&lt;p>因此，为了解决vpp（物理交换机也适用）各配置项的依赖关系，以及保证原子性和持久性，实现崩溃恢复，需要在管控面agent侧处理好上述问题。&lt;/p>
-&lt;h3 id="事务处理">事务处理&lt;/h3>
-&lt;p>本人对分布式事务领域涉及不深，以下摘自于&lt;/p>
-&lt;p>本地事务（也可称为局部事务），是单个服务使用单个数据源场景，也就是最基本的本地数据落盘的事务。本地事务要求底层数据源需要支持事务的开启、终止、提交、回滚、嵌套等。在数据库领域（ARIES理论，基于语义的恢复与隔离），感兴趣的可以研究下commiting logging机制（OceanBase）和shadow paging&lt;/p>
-&lt;p>全局事务，是单个服务多个数据源场景。主要目的是为了解决事务一致性问题，并做到统一提交，统一回滚的功能。例如我有一个全局事务需要在A表中写入记录a（本地事务A），再在B表中写入记录b（本地事务B），A表和B表分别在两台物理机的磁盘上。在数据存储领域由X/Open XA对此发布了一个事务处理架构，且当前很多分布式事务处理框架都是基于此来设计的。主要核心如下：&lt;/p>
-&lt;ul>
-&lt;li>全局事务管理器（Transaction Manager，TM）：协调全局事务&lt;/li>
-&lt;li>局部资源管理器（Resource Manaeger，RM）：驱动本地事务&lt;/li>
-&lt;li>模型：XA，TCC，SAGA，AT 。。。&lt;/li>
-&lt;/ul>
-&lt;p>感兴趣的可以研究下阿里的seata。&lt;/p>
-&lt;h3 id="事务处理视角看待vpp管控面">事务处理视角看待vpp管控面&lt;/h3>
-&lt;h4 id="本地事务">本地事务&lt;/h4>
-&lt;ul>
-&lt;li>vpp的配置是内存上的配置，不需要落盘。&lt;/li>
-&lt;li>vpp的每个资源的api可视为一个数据源&lt;/li>
-&lt;li>数据源没有实现事务的开启、终止、提交、回滚、嵌套、设置隔离级别等能力，只提供了下发，删除，读取接口&lt;/li>
-&lt;li>上述数据源未提供的能力需要agent来补齐&lt;/li>
-&lt;/ul>
-&lt;h4 id="全局事务">全局事务&lt;/h4>
-&lt;ul>
-&lt;li>agent暴露给上层的接口可视为全局事务&lt;/li>
-&lt;li>有些全局事务只涉及单个数据源，有些全局事务涉及多个数据源&lt;/li>
-&lt;li>agent内部需要实现TM，将全局事务转为有序的本地事务列表&lt;/li>
-&lt;li>agent内部需要实现RM，调用vpp api，驱动本地事务的执行&lt;/li>
-&lt;/ul>
-&lt;p>举例：&lt;/p></description></item><item><title>初识srv6</title><link>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86srv6/</link><pubDate>Sat, 01 Oct 2022 09:18:21 +0800</pubDate><guid>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86srv6/</guid><description>&lt;p>翻译自SRv6 Network Programming
-draft-filsfils-spring-srv6-network-programming-07&lt;/p>
-&lt;h3 id="srh">SRH&lt;/h3>
-&lt;p>Segment Routing Header&lt;/p>
-&lt;p>SRH在一个报文中可以有多个&lt;/p>
-&lt;h3 id="nh">NH&lt;/h3>
-&lt;p>ipv6 next-header field&lt;/p>
-&lt;p>Srv6的Routing Header的type是4，IP6 header的NH字段是43&lt;/p>
-&lt;h3 id="sid">SID&lt;/h3>
-&lt;p>编排链节点的ID，srv6节点的SID table里面保存自己在各个编排链内的SID。local SID可以是设备外部接口（不会是内部接口）的ipv6地址。例如已经在外部接口配置了地址A和地址B，内部loopback配置了地址C。地址A和地址B会默认被加入到SID Table。&lt;/p>
-&lt;p>地址B可以是路由不可达的，为什么？&lt;/p>
-&lt;p>可以将地址A理解成全局segments，地址B为本地segments。只要报文在发送时加入了SID list&amp;lt;A,B&amp;gt;，A在B的前面，只要A对外路由可达，报文就会被送到A，然后在本地进行下一步的处理（发往本地的B）&lt;/p>
-&lt;p>(SA,DA) (S3, S2, S1; SL)&lt;/p>
-&lt;p>S1是第一跳，S3是最后一跳。SL剩下几跳，也可理解为下一个SID节点的下标。例如SL=0， 表示SRH[0]=S3，下一个SID处理节点的ip地址是S3&lt;/p>
-&lt;h3 id="sid格式">SID格式&lt;/h3>
-&lt;p>SID Table中并不是以Ip的形式保存SID的&lt;/p>
-&lt;p>LOC:FUNCT:ARGS::&lt;/p>
-&lt;h3 id="function">function&lt;/h3>
-&lt;p>每个SID可以绑定多个function。function与SID的绑定关系存在SID Table中。这个特性决定了SRV6的高度可编程性。&lt;/p>
-&lt;p>function太多，不一一列出，总结下规律&lt;/p>
-&lt;p>带有D的，表示Decapsulation，如果SL==0（已经是最后一跳）且NH!=SRH(没有嵌套另一个SRH)，且SRH的ENH（下一层header类别）符合function的定义(例如DT6，ENH必须是41(ipv6 encapsulation))，则剥去SRH&lt;/p>
-&lt;p>带有T的，表示table，查对应的fib表&lt;/p>
-&lt;p>带有X的，表示cross-connect，往邻接表对应的Ip地址发（直接拿mac）&lt;/p>
-&lt;p>带V的，表示Vlan，往对应Vlan发（改Vlan头部）&lt;/p>
-&lt;p>带B的，表示bond，insert在老的SRH和Ipv6 Header之间新插入一个SRH，将DA改为新的SRH的第一个segment；encap则是在最外面新插入一个ipv6头部，新ipv6头部SA是内部ipv6头部的SA，DA是新ipv6头部下的SRH的第一跳&lt;/p></description></item><item><title/><link>https://scottlx.github.io/about/aboutme/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://scottlx.github.io/about/aboutme/</guid><description/></item><item><title/><link>https://scottlx.github.io/tools/tools/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://scottlx.github.io/tools/tools/</guid><description/></item><item><title>归档</title><link>https://scottlx.github.io/archives/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://scottlx.github.io/archives/</guid><description/></item></channel></rss>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>windseek</title><link>https://scottlx.github.io/</link><description>Recent content on windseek</description><generator>Hugo -- gohugo.io</generator><language>zh-CN</language><lastBuildDate>Mon, 26 May 2025 17:53:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/index.xml" rel="self" type="application/rss+xml"/><item><title>深入剖析cilium monitor机制</title><link>https://scottlx.github.io/posts/%E6%B7%B1%E5%85%A5%E5%89%96%E6%9E%90cilium-monitor%E6%9C%BA%E5%88%B6/</link><pubDate>Mon, 26 May 2025 17:53:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E6%B7%B1%E5%85%A5%E5%89%96%E6%9E%90cilium-monitor%E6%9C%BA%E5%88%B6/</guid><description>可调试性 报文转发面组件中，可调试性十分关键。开发阶段可能可以使用gdb（ebpf甚至不能用gdb，只能用trace_printk），log等方式进行调试，但到了生产环境，以下几个功能是必须要完备的：
+抓包手段
+按照网卡抓包 按照流进行抓包 按照特定过滤条件抓包，例如源目的地址，端口，协议号等 报文计数
+收发包计数：rx，tx阶段计数 丢包计数：按照错误码进行区分 特定观测点计数：一些重要转发函数，例如l3_fwd, arp_response等 流日志
+流量方向：egress/ingress session信息：五元组，nat信息，tcp状态等 其他必要的上下文：例如转发表项查找的结果，构造的action，硬件卸载标记等 linux perf_events ebpf perf基于linux perf_event子系统。epbf通知用户态拷贝数据时基于perf_events的
+perf buffer ebpf中提供了内核和用户空间之间高效地交换数据的机制：perf buffer。它是一种per-cpu的环形缓冲区，当我们需要将ebpf收集到的数据发送到用户空间记录或者处理时，就可以用perf buffer来完成。它还有如下特点：
+能够记录可变长度数据记； 能够通过内存映射的方式在用户态读取读取数据，而无需通过系统调用陷入到内核去拷贝数据； 实现epoll通知机制 因此在cilium中，实现上述调试手段的思路，就是在转发面代码中构造相应的event到EVENTS_MAP，之后通过别的工具去读取并解析EVENTS_MAP中的数据
+EVENTS_MAP定义如下: bpf/lib/events.h
+struct { __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY); __uint(key_size, sizeof(__u32)); __uint(value_size, sizeof(__u32)); __uint(pinning, LIBBPF_PIN_BY_NAME); __uint(max_entries, __NR_CPUS__); } EVENTS_MAP __section_maps_btf; key是cpu的编号，因此大小是u32；value一般是文件描述符fd，关联一个perf event，因此也是u32
+数据面代码构造好data之后，使用helper function: bpf_perf_event_output通知用户态代码拷贝数据
+下面是cilium代码中封装好的event输出函数，最终就是调用的bpf_perf_event_output
+// bpf/include/bpf/ctx/skb.h #define ctx_event_output skb_event_output // bpf/include/bpf/helpers_skb.h /* Events for user space */ static int BPF_FUNC_REMAP(skb_event_output, struct __sk_buff *skb, void *map, __u64 index, const void *data, __u32 size) = (void *)BPF_FUNC_perf_event_output; //对应的func id 是 25 // /usr/include/linux/bpf.</description></item><item><title>bpf lpm trie</title><link>https://scottlx.github.io/posts/bpf_lpm_trie/</link><pubDate>Thu, 06 Mar 2025 15:49:00 +0800</pubDate><guid>https://scottlx.github.io/posts/bpf_lpm_trie/</guid><description>lpm有多种实现方式，最常用的是用trie。当然也会有更简单的实现方式，例如某些特定场景用多重哈希表就能解决（ipv4地址，32个掩码对应32个哈希表）
+从4.11内核版本开始，bpf map引入了BPF_MAP_TYPE_LPM_TRIE
+主要是用于匹配ip地址，内部是将数据存储在一个不平衡的trie中，key使用prefixlen,data
+data是以大端网络序存储的，data[0]存的是msb。
+prefixlen支持8的整数倍，最高可以是2048。因此除了ip匹配，还可以用来做端口，协议，vpcid等等的扩充匹配。在应用层面上除了做路由表，还可以作为acl，policy等匹配过滤的底层实现
+使用方式 BPF_MAP_TYPE_LPM_TRIE — The Linux Kernel documentation
+除了上述基本的Ipv4的使用方式，扩展使用方式可以参考一下cillium中IPCACHE_MAP的使用
+首先是map的定义
+struct ipcache_key { struct bpf_lpm_trie_key lpm_key; __u16 cluster_id; __u8 pad1; __u8 family; union { struct { __u32 ip4; __u32 pad4; __u32 pad5; __u32 pad6; }; union v6addr ip6; }; } __packed; /* Global IP -&amp;gt; Identity map for applying egress label-based policy */ struct { __uint(type, BPF_MAP_TYPE_LPM_TRIE); __type(key, struct ipcache_key); __type(value, struct remote_endpoint_info); __uint(pinning, LIBBPF_PIN_BY_NAME); __uint(max_entries, IPCACHE_MAP_SIZE); __uint(map_flags, BPF_F_NO_PREALLOC); } IPCACHE_MAP __section_maps_btf; 可以看到cillium将v4和v6合并成一个map查询，匹配条件并带上了cluster_id</description></item><item><title>cilium datapath</title><link>https://scottlx.github.io/posts/cilium-datapath/</link><pubDate>Mon, 03 Mar 2025 18:15:00 +0800</pubDate><guid>https://scottlx.github.io/posts/cilium-datapath/</guid><description>hook点 大部分是挂载位置是tc，tc是网络协议栈初始处理挂载点
+// linux source code: dev.c __netif_receive_skb_core | list_for_each_entry_rcu(ptype, &amp;amp;ptype_all, list) {...} // packet capture | do_xdp_generic // handle generic xdp | sch_handle_ingress // tc ingress | tcf_classify | __tcf_classify // ebpf program is working here 如果没有下发policy，xdp就不会挂载各类filter程序
+网络设备 cillium的网络方案不像常规的网桥模式（ovs，linux bridge），datapath不是一个完整的run to completion，而是分散在各个虚拟接口上，类似pipeline模式
+cillium_host: 集群内所有podCIDR的网关，地址对容器可见
+cilium_net: cilium_host的veth对，ipvlan模式才会用到？
+clilium_vxlan: 用来提供Pod跨节点通信overlay封装
+lxcXXXX: 容器veth对在主机侧的接口
+同节点pod2pod cillium_host是所有pod的网关，因此会先arp request该地址。arp相应其实是在lxc处被代答了，arp报文不会走到cillium_host
+// bpf_lxc.c __section_entry int cil_from_container(struct __ctx_buff *ctx) { ... case bpf_htons(ETH_P_ARP): ret = tail_call_internal(ctx, CILIUM_CALL_ARP, &amp;amp;ext_err); break; .</description></item><item><title>dpvs icmp session</title><link>https://scottlx.github.io/posts/dpvs-icmp/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs-icmp/</guid><description>原生的ipvs仅处理三种类型的ICMP报文：ICMP_DEST_UNREACH、ICMP_SOURCE_QUENCH和ICMP_TIME_EXCEEDED
+对于不是这三种类型的ICMP，则设置为不相关联(related)的ICMP，返回NF_ACCEPT，之后走本机路由流程
+dpvs对ipvs进行了一些修改，修改后逻辑如下
+icmp差错报文流程 __dp_vs_in
+__dp_vs_in_icmp4 （处理icmp差错报文，入参related表示找到了关联的conn）
+若不是ICMP_DEST_UNREACH，ICMP_SOURCE_QUENCH，ICMP_TIME_EXCEEDED，返回到_dp_vs_in走普通conn命中流程
+icmp差错报文，需要将报文头偏移到icmp头内部的ip头，根据内部ip头查找内部ip的conn。
+若找到conn，表明此ICMP报文是由之前客户端的请求报文所触发的，由真实服务器回复的ICMP报文。将related置1
+若未找到则返回accept，返回到_dp_vs_in走普通conn命中流程
+​ __xmit_inbound_icmp4 ​ 找net和local路由，之后走__dp_vs_xmit_icmp4
+__dp_vs_xmit_icmp4 ​ 数据区的前8个字节恰好覆盖了TCP报文或UDP报文中的端口号字段（前四个字节）
+inbound方向根据内部ip的conn修改数据区目的端口为conn-&amp;gt;dport，源端口改为conn-&amp;gt;localport，
+outbound方向将目的端口改为conn-&amp;gt;cport，源端口改为conn-&amp;gt;vport
+​
+client (cport ) &amp;lt;&amp;ndash;&amp;gt; (vport)lb(lport) &amp;lt;&amp;ndash;&amp;gt; rs(dport)
+​ 重新计算icmp头的checksum，走ipv4_output
+实际应用上的问题
+某个rs突然下线，导致有时访问vip轮询到了不可达的rs，rs侧的网关发送了一个dest_unreach的icmp包
+该rs的conn还未老化，__dp_vs_in_icmp4流程根据这个icmp的内部差错ip头找到了还未老化的conn，将icmp数据区的port进行修改发回给client
+但是一般情况，rs下线后，该rs的conn会老化消失，内层conn未命中，还是走外层icmp的conn命中流程转给client。这样内部数据区的端口信息是错的（dport-&amp;gt;lport，正确情况是vport-&amp;gt;cport）
+非差错报文流程 返回_dp_vs_in走普通conn命中流程
+原本dp_vs_conn_new流程中，先查找svc。icmp的svc默认使用端口0进行查找。但是ipvsadm命令却对端口0的service添加做了限制，导致无法添加这类svc。
+svc = dp_vs_service_lookup(iph-&amp;gt;af, iph-&amp;gt;proto, &amp;amp;iph-&amp;gt;daddr, 0, 0, mbuf, NULL, &amp;amp;outwall, rte_lcore_id()); 若未查到走INET_ACCEPT(也就是继续往下进行走到ipv4_output_fin2查到local路由，若使用dpip addr配上了vip或lip地址，则会触发本地代答)。
+若查到svc，则进行conn的schedule，之后会走dp_vs_laddr_bind，但是dp_vs_laddr_bind不支持icmp协议(可以整改)，最终导致svc可以查到但是conn无法建立，最后走INET_DROP。
+概括一下：
+未命中svc，走后续local route，最终本地代答 命中svc后若conn无法建立，drop 命中svc且建立conn，发往rs或client icmp的conn ​
+_ports[0] = icmp4_id(ich); _ports[1] = ich-&amp;gt;type &amp;lt;&amp;lt; 8 | ich-&amp;gt;code; Inbound hash和outboundhash的五元组都使用上述这两个port进行哈希，并与conn进行关联。</description></item><item><title>dpvs route转发</title><link>https://scottlx.github.io/posts/dpvs-route%E8%BD%AC%E5%8F%91/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs-route%E8%BD%AC%E5%8F%91/</guid><description>ipv4_rcv_fin 是路由转发逻辑， INET_HOOKPRE_ROUTING 中走完hook逻辑后，根据dpvs返回值走ipv4_rcv_fin
+路由表结构体 struct route_entry { uint8_t netmask; short metric; uint32_t flag; unsigned long mtu; struct list_head list; struct in_addr dest; //cf-&amp;gt;dst.in struct in_addr gw;// 下一跳地址，0说明是直连路由，下一跳地址就是报文自己的目的地址，对应配置的cf-&amp;gt;via.in struct in_addr src; // cf-&amp;gt;src.in， 源地址策略路由匹配 struct netif_port *port; // 出接口 rte_atomic32_t refcnt; }; 路由类型 /* dpvs defined. */ #define RTF_FORWARD 0x0400 #define RTF_LOCALIN 0x0800 #define RTF_DEFAULT 0x1000 #define RTF_KNI 0X2000 #define RTF_OUTWALL 0x4000 路由表类型 #define this_route_lcore (RTE_PER_LCORE(route_lcore)) #define this_local_route_table (this_route_lcore.local_route_table) #define this_net_route_table (this_route_lcore.</description></item><item><title>dpvs session 同步</title><link>https://scottlx.github.io/posts/dpvs-session%E5%90%8C%E6%AD%A5/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs-session%E5%90%8C%E6%AD%A5/</guid><description>总体架构 lb session同步采用分布式架构，session创建流程触发session数据发送，依次向集群内所有其他节点发送 其他节点收到新的session数据修改本地session表。 session接收和发送各占一个独立线程。
+step1: 向所有其他节点发送session数据 remote session：从别的节点同步来的session
+local session：本节点收到数据包自己生成的session
+step2: session同步至worker 方案一（有锁）： • 独立进程和core处理session同步（per numa） • 每个lcore分配local session和remote session，正常情况下都能直接从local session走掉 • 同步过来的session写到remote session表 • session ip根据fdir走到指定进程
+方案二（无锁）： • 独立进程和core处理session同步消息 • 每个lcore 有来local session和remote session，通过owner属性区分。 • 同步过来的session由session_sync core发消息给对应的slave，由对应的slave进行读写，因此可以做到无锁。 • session ip根据fdir走到指定core
+session同步具体实现 亟待解决的问题： 同步过来的session什么时候老化？
+别的节点上线，本节点要发送哪些session？
+别的节点下线，本节点要删除哪些session？
+是否要响应下线节点的删除/老化请求？
+下线节点怎么知道自己已经下线（数据面）？
+解决方案： 方案一： session增加owner属性c owner属性：
+conn.owner // indicates who has this session session 同步状态转移图
+一条session在一个集群中，应当只有一台机器在使用，所以有一个owner属性，代表这条session被谁拥有，其它所有机器只对这条session的owner发起的增删改查请求做响应。
+同步动作 session同步应当时实时的。在以下场景被触发： 新建session 发送方： session新建完成之后：对于tcp，是握手完毕的；对于udp，是第一条连接。 接收方： 接收来自发送方的session，在对应core上新建这条连接，开启老化，老化时间设定为默认时间（1小时）。 fin/rst 发送方： 发送删除session消息 接收方： 接收方接收session，做完校验后在对应core上删除session 老化 发送方： 老化时间超时之后，本地session删除，同时发布老化信息，告知其它lb， 接收方： 其它lb 做完校验后，开始老化这条session。 设备下线 下线后通过控制器更新其他lb的session同步地址信息，不再向该设备同步，同时开始老化全部属于该设备的session。 设备上线（包含设备扩容） 新设备： 新上线设备引流前要接收其他设备的存量session信息，这个功能通过控制器触发完成，控制器感知到新lb上线后通知集群内其他lb向它同步存量session，session数量达到一致时（阿里gw用70%阈值）允许新lb引流。 旧设备： 向目的方发送全部的属于自己的session。</description></item><item><title>dpvs 数据流分析</title><link>https://scottlx.github.io/posts/dpvs%E6%95%B0%E6%8D%AE%E6%B5%81%E5%88%86%E6%9E%90/</link><pubDate>Tue, 18 Feb 2025 11:11:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpvs%E6%95%B0%E6%8D%AE%E6%B5%81%E5%88%86%E6%9E%90/</guid><description>dpvs ingress流程分析 从 lcore_job_recv_fwd 开始，这个是dpvs收取报文的开始
+设备层 dev-&amp;gt;flag &amp;amp; NETIF_PORT_FLAG_FORWARD2KNI &amp;mdash;&amp;gt; 则拷贝一份mbuf到kni队列中，这个由命令行和配置文件决定（做流量镜像，用于抓包）
+eth层 netif_rcv_mbuf 这里面涉及到vlan的部分不做过多解析
+不支持的协议
+目前dpvs支持的协议为ipv4, ipv6, arp。 其它报文类型直接丢给内核。其他类型可以看 eth_types。 to_kni
+RTE_ARP_OP_REPLY
+复制 nworks-1 份mbuf，发送到其它worker的arp_ring上 ( to_other_worker ), 这份报文fwd到 arp协议.
+RTE_ARP_OP_REQUEST
+这份报文fwd到 arp协议.
+arp协议 arp协议处理 neigh_resolve_input
+RTE_ARP_OP_REPLY
+建立邻居表，记录信息，并且把这个报文送给内核。 to_kni
+RTE_ARP_OP_REQUEST
+无条件返回网卡的ip以及mac地址 (free arp), netif_xmit 发送到 core_tx_queue
+其它op_code
+drop
+ip层 ipv4协议 (ipv6数据流程上一致) ipv4_rcv
+ETH_PKT_OTHERHOST
+报文的dmac不是自己， drop
+ipv4 协议校验
+不通过， drop
+下一层协议为 IPPROTO_OSPF
+to_kni
+INET_HOOK_PRE_ROUTING hook
+hook_list: dp_vs_in , dp_vs_prerouting
+这两个都与synproxy有关系，但是我们不会启用这个代理，不过需要注意的是syncproxy不通过时会丢包 drop</description></item><item><title>dpdk rcu lib</title><link>https://scottlx.github.io/posts/dpdk-rcu/</link><pubDate>Fri, 08 Dec 2023 17:48:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpdk-rcu/</guid><description>linux的RCU主要针对的数据对象是链表，目的是提高遍历读取数据的效率，为了达到目的使用RCU机制读取数据的时候不对链表进行耗时的加锁操作。这样在同一时间可以有多个线程同时读取该链表，并且允许一个线程对链表进行修改。RCU适用于需要频繁的读取数据，而相应修改数据并不多的情景。
+dpdk中由于writer和reader同时访问一段内存，删除元素的时候需要确保
+删除时不会将内存put回allocator，而是删掉这段内存的引用。这样确保了新的访问者不会拿到这个元素的引用，而老的访问者不会在访问过程中core掉 只有在元素没有任何引用计数时，才释放掉该元素的内存 静默期是指线程没有持有共享内存的引用的时期，也就是下图绿色的时期
+上图中，有三个read thread，T1， T2，T3。两条黑色竖线分别代表writer执行delete和free的时刻。
+执行delete时，T1和T2还拿着entry1和entry2的reference，此时writer还不能free entry1或entry2的内存，只能删除元素的引用.
+writer必须等到执行delete时，当时引用该元素的的线程，都完成了一个静默期之后，才可以free这个内存。
+writer不需要等T3进入静默期，因为执行delete时，T3还在静默期。
+如何实现RCU机制
+writer需要一直轮询reader的状态，看是否进入静默期。这样会导致一直循环轮询，造成额外的cpu消耗。由于需要等reader的静默期结束，reader的静默期越长，reader的数量越多，writer cpu的消耗会越大，因此我们需要短的grace period。但是如果将reader的critical section减小，虽然writer的轮询变快了，但是reader的报告次数增加，reader的cpu消耗会增加，因此我们需要长的critical section。这两者之间看似矛盾。 长的critical section：dpdk的lcore一般都是一个while循环。循环的开始和结束必定是静默期。循环的过程中肯定是在访问各种各样的共享内存。因此critical section的粒度可以不要很细，不要每次访问的时候退出静默期，不访问的时候进入静默期，而是将整个循环认为是critical section，只有在循环的开始退出静默期，循环的结束进入静默期。 短的grace period：如果是pipeline模型，并不是所有worker都会使用相同的数据结构。话句话说，同一个元素，只会被部分的worker所引用和读取。因此writer不需要等到所有worker的critical section结束，而是使用该元素的worker结束critical section。这样将grace period粒度变小之后，缩短了writer整体的grace period。这种粒度的控制是通过 qsbr 实现的 如何使用rcu库 dpdk-stable-20.11.1/app/test/test_rcu_qsbr.c test_rcu_qsbr_sw_sv_3qs
+先创建出struct rte_rcu_qsbr
+sz = rte_rcu_qsbr_get_memsize(RTE_MAX_LCORE); rv = (struct rte_rcu_qsbr *)rte_zmalloc(NULL, sz, RTE_CACHE_LINE_SIZE); 再初始化QS variable
+rte_rcu_qsbr_init(rv, RTE_MAX_LCORE); Reader注册自己的线程号，并上线（将自己加到writer的轮询队列里面） online时会原子读qsbr里的token，并设置到v-&amp;gt;qsbr_cnt[thread_id].cnt中
+(void)rte_rcu_qsbr_thread_register(rv, lcore_id); rte_rcu_qsbr_thread_online(rv, lcore_id); 每次读取共享数据后，更新自己的静默状态（rte_rcu_qsbr_quiescent）
+do { for (i = 0; i &amp;lt; num_keys; i += j) { for (j = 0; j &amp;lt; QSBR_REPORTING_INTERVAL; j++) rte_hash_lookup(tbl_rwc_test_param.</description></item><item><title>contiv memif</title><link>https://scottlx.github.io/posts/contiv-memif/</link><pubDate>Fri, 07 Apr 2023 15:10:00 +0800</pubDate><guid>https://scottlx.github.io/posts/contiv-memif/</guid><description>contiv memif contiv的cni与device plugin相结合，实现了：
+Pod能同时接入不止一张网卡 Pod接入的网卡可以是tap，veth，memif devicePlugin Device Plugin实际是一个运行在Kubelet所在的Node上的gRPC server，通过Unix Socket、基于以下（简化的）API来和Kubelet的gRPC server通信，并维护对应设备资源在当前Node上的注册、发现、分配、卸载。 其中，ListAndWatch()负责对应设备资源的discovery和watch；Allocate()负责设备资源的分配。
+Insight kubelet kubelet接收上图格式的API。API中的annotations定义了pod的网卡个数与类型，resources中定义了所需要的device plugin的资源，也就是memif。
+kubelet执行常规的syncPod流程，调用contiv cni创建网络。此时会在请求中将annotation传递给cni。
+同时，agent的DevicePluginServer会向kubelet注册rpc服务，注册contivpp.io/memif的设备资源，从而kubelet的device manager会grpc请求DevicePluginServer获取contivpp.io/memif设备资源。
+cni cni实现了github.com/containernetworking/cni标准的add和del接口。实际上做的事情只是将cni请求转换为了对agent的grpc请求：解析args，并通过grpc调用agent的接口发送cniRequest，再根据grpc的返回结果，将结果再次转换成标准cni接口的返回格式
+Agent podmanager podmanager实现了上述cni调用的grpc server，主要任务是将cni的request转换为内部的event数据格式，供event loop处理。
+request是cni定义的请求数据类型，详见https://github.com/containernetworking/cni/blob/master/SPEC.md#parameters
+event则是agent内部的关于pod事务模型，类似原生kvScheduler的针对vpp api的transaction。每一种event都会对应一个plugin去实现他的handler，供event loop调用。
+event loop event loop是整个contiv agent的核心处理逻辑，北向对接event queue，南向调用各个EventHandler，将event转换为kvScheduler的事务。
+执行了以下步骤：
+对事件的预处理，包括校验，判断事件类型，加载必要的配置等 判断是否是更新的事件 对事件的handler进行排序，并生成正向或回退的handler顺序 与本次事件无关的handler过滤掉 创建对这次事件的记录record 打印上述步骤生成的所有事件相关信息 执行事件更新或同步，生成vpp-agent里的事务 将contiv生成的配置与外部配置进行merge，得到最终配置 将最终配置的vpp-agent事务commit到agent的kvscheduler 若事务失败，将已经完成的操作进行回退 完成事件，输出记录record与计时 打印回退失败等不可恢复的异常 若开启一致性检查，则最好再执行一次同步校验 devicemanager devicemanager既实现了对接kublet的DevicePluginServer，又实现了AllocateDevice类型的event的handler。换句话说是自己产生并处理自己的event。
+主要业务逻辑：
+创建memif socket文件的目录并挂载至容器
+创建连接socket的secret。
+上述的创建并不是真实的创建，而是把需要的信息(event.Envs, event.Annotations, event.Mounts)通过grpc返回给kublet，让kubelet去创建。
+devicemanager还会将上述memif的信息保存在缓存中，供其他插件来获取。若缓存中信息不存在，则会调用kubelet的api获取信息。
+ipNet ipNet插件主要负责node和pod中各类网卡的创建销毁，vxlan的分配，vrf的分配等
+更新网卡时，ipnet会读取annotation中kv，判断网卡类型。若类型为memif，则会向deviceManager获取当前pod里各容器的memifInfo，之后根据memifInfo里的socket地址和secret，创建memif类型的网卡事务，并 push 至kvscheduler</description></item><item><title>数位dp</title><link>https://scottlx.github.io/posts/%E6%95%B0%E4%BD%8Ddp/</link><pubDate>Mon, 20 Mar 2023 11:50:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E6%95%B0%E4%BD%8Ddp/</guid><description>题目特征 要求统计满足一定条件的数的数量（即，最终目的为计数，若要结果则只能回溯爆搜得到）；
+这些条件经过转化后可以使用「数位」的思想去理解和判断；
+输入会提供一个数字区间（有时也只提供上界）来作为统计的限制；
+上界很大（比如 10^{18}），暴力枚举验证会超时。
+思路 从高到低枚举每一位，统计符合target的个数，并记录到dp数组中。枚举完毕之后则得到答案。
+因此数位dp的第一个状态都是数位的位置，第二个状态由题意来定
+模板 以leetcode1012为例，统计小于等于n的数字中每一位的数字至少重复一次的个数。
+模板时灵神的模板。难点主要是mask，isLimit，isNum这几个标识
+mask即dp的第二个状态，这边用到了状态压缩的思想，将0到9选过的状态压缩成一个数字(否则要10个状态) isLimit 标识了本次(i)选择的范围，是否受到n的影响。如果不引进这个变量，则需要考虑当前数字的最高位来决定本次的范围(最高位==n的最高位时，本次的范围是[0,s[i]],最高位&amp;lt;n的最高位时，本次的范围是[0,9])。可以发现这个限制是有传递的性质的，因此引入这个变量能简化范围的选择过程。 isNum 标识了本次(i)之前是否有数字，换句话说本次(i)是否是第一个数字(最高位)。这个标识主要是解决前导0的问题，否则答案里会重复(前导两个0和前导三个0虽然是同个数字，但都会被记入答案) func numDupDigitsAtMostN(n int) (ans int) { s := strconv.Itoa(n) // s[0]是最高位 /* 若需要从低到高的顺序，则按如下生成 for ; n &amp;gt; 0; n = n / 10 { list = append(list, n%10) } */ m := len(s) dp := make([][1 &amp;lt;&amp;lt; 10]int, m) // 数位dp的第一个状态都是数位的位置，第二个状态由题意来定 // 问题转换为计算没有重复数字的个数，因此第二个状态记录已经选过数字的集合 // i 表示从高到低第i位， j是前面已经选过的数字的集合,最大为[0,9]的子集个数 // 例如集合 {0,2,3} 对应的二进制数为 1101 （集合的思想就是状压） for i := range dp { for j := range dp[i] { dp[i][j] = -1 // -1 表示没有计算过 } } var f func(int, int, bool, bool) int // mask是dp数组中第二个状态 // isLimit表示当前是否受到n的约束，若为true表示当前位最大填s[i] // 若isLimit为true时填了s[i],则isLimit为true传递到下一位，下一位也受到n的约束 // isNum主要是处理前导零的问题。isNum表示i前面是否填了数字 // 若isNum为true，则i位可以从0开始填；否则，说明i是第一位，i可以不填，或者至少填1(因为不能有前导0) f = func(i, mask int, isLimit, isNum bool) (res int) { if i == m { // base case，遍历完毕 if isNum { // 且不是全部跳过不选的 return 1 // 得到了一个合法数字 } return } if !</description></item><item><title>raft选举流程</title><link>https://scottlx.github.io/posts/raft%E9%80%89%E4%B8%BE%E6%B5%81%E7%A8%8B/</link><pubDate>Fri, 28 Oct 2022 09:30:00 +0800</pubDate><guid>https://scottlx.github.io/posts/raft%E9%80%89%E4%B8%BE%E6%B5%81%E7%A8%8B/</guid><description>图解 Raft (thesecretlivesofdata.com)
+算法目的：实现了分布式节点的数据一致性
+节点有三个状态：follower，candidate，leader
+leader election 初始阶段所有节点处于follower状态
+follower状态下节点存在一个election timeout（150ms—300ms之间的随机数，随机降低了多个节点同时升级为candidate的可能性），election timeout内没有收到leader的heartbeat后，会自动升级为candidate状态，并开始一个新的election term。term是全局的，表示整个集群发生过选举的轮次(任期)。
+candidate状态下，节点会向集群内所有节点发送requests votes请求。其他节点收到requests votes请求后，如果在本次term内还没有投过票，则会返回选票，如果candidate收到的选票占集群节点的大多数，则升级为本次term的leader节点。升级为leader之后向他的follower 发送append entries消息（也就是包含entry消息的心跳），follower也会返回消息的response，系统正常情况下维持在该状态
+如果选举时，在一个term内发生了两个节点有同样的选票，会在超时过后进入下一轮进行重新选举
+log replication client的请求只会发往leader。leader收到改动后，将改动写入日志（还未持久化commit），并将改动通过heartbeat广播至follower节点。follower节点写了entry之后（此时还未commit），返回ack。leader收到大于集群节点一半的ack之后，认为已经可以commit了，广播commit的通知。最终集群内所有follower触发commit，向leader返回ack。最后leader认为集群已经达成一致性了，向client返回ack
+如果集群中产生网络隔离，每个隔离域中会产生一个新的leader，整个集群会存在多个leader。follower少的leader由于获取不到majority ack，他的entry不会被commit。此时client往另一个follower多的leader发送数据改变请求，该隔离域的节点会被commit
+此时去掉网络隔离后，之前follower少的隔离域内未commit的entry会被刷成之前follower多的隔离域的entry,随后commit，此时集群再次达成一致性</description></item><item><title>etcd client v3 连接流程</title><link>https://scottlx.github.io/posts/etcd-client-v3%E8%BF%9E%E6%8E%A5%E6%B5%81%E7%A8%8B/</link><pubDate>Fri, 28 Oct 2022 09:15:00 +0800</pubDate><guid>https://scottlx.github.io/posts/etcd-client-v3%E8%BF%9E%E6%8E%A5%E6%B5%81%E7%A8%8B/</guid><description>首先需要了解grpc框架的一些概念，这边引用网上的一张图 Resolver 提供一个用户自定义的解析、修改地址的方法，使得用户可以自己去实现地址解析的逻辑、做服务发现、地址更新等等功能。
+将Endpoints里的ETCD服务器地址(127.0.0.1:2379这种格式)做一次转换传给grpc框架。也可以自己重新写此resolver，做服务发现功能。例如etcd服务器地址写nacos之类的地址，在resolver中写好转换逻辑。 调用ClientConn的ParseServiceConfig接口告诉endpoints的负载策略是轮询 Balancer 管理subConns，并收集各conn信息，更新状态至ClientConn 生成picker(balancer)的快照，从而ClientConn可以选择发送rpc请求的subConn 此处etcd client没有实现balancer，默认使用grpc提供的轮询的balancer
+重试策略 与一般的c-s模型不同，etcd client的重试是针对集群的重试。单个节点的断连不会造成所有节点的重连。
+重试机制 一般的重试是对同一个节点进行重试，但etcd client的自动重试不会在ETCD集群的同一节点上进行，是轮询重试集群的每个节点。重试时不会重新建连，而是使用balancer提供的transport。transport的状态更新与这一块的重试是通过balancer解耦的。
+重试条件 etcd unary拦截器 拦截器类似http里的中间件的概念，在发送实际请求之前对报文进行篡改。一般用来添加认证，日志记录，缓存之类的功能。
+此处etcd的一元拦截器主要做了自动重试的功能，且只会重试一些特定的错误(DeadlineExceeded, Canceled,ErrInvalidAuthToken)
+func (c *Client) unaryClientInterceptor(optFuncs ...retryOption) grpc.UnaryClientInterceptor { ... if isContextError(lastErr) { if ctx.Err() != nil { // its the context deadline or cancellation. return lastErr } // its the callCtx deadline or cancellation, in which case try again. continue } if callOpts.retryAuth &amp;amp;&amp;amp; rpctypes.Error(lastErr) == rpctypes.ErrInvalidAuthToken { // clear auth token before refreshing it.</description></item><item><title>单调栈</title><link>https://scottlx.github.io/posts/%E5%8D%95%E8%B0%83%E6%A0%88/</link><pubDate>Thu, 13 Oct 2022 10:21:21 +0800</pubDate><guid>https://scottlx.github.io/posts/%E5%8D%95%E8%B0%83%E6%A0%88/</guid><description>由于数据在栈内是单调递增或单调递减的，单调栈适合用来找出数组中第一个大于或小于某个元素的场景。元素出栈后，再根据题意对出栈元素进行处理，更新数据至result。
+标准模板 第一个for循环内循环输入数组， 第二个for循环维持栈内单调特性，不满足单调的元素依次出栈 第一个for循环内对元素入栈 496. 下一个更大元素 I 直接输入出栈元素即可
+func nextGreaterElement(nums1 []int, nums2 []int) []int { //单调递减栈 var stack,res []int //标准模板，首个元素先入栈 stack = append(stack, 0) //由于只需要输出num1的元素，构造nums1的map作为需要输出数据的查询 map1 := make(map[int]int) for i,v := range(nums1) { map1[v] = i //顺便初始化res，查不到的为-1 res = append(res, -1) } for i:=1; i &amp;lt; len(nums2); i++ { // 单调递减，所以&amp;gt;=的都出栈 for len(stack) &amp;gt; 0 &amp;amp;&amp;amp; nums2[stack[len(stack)-1]] &amp;lt;= nums2[i] { // 查表，需要输出的加入res if idx, ok := map1[nums2[stack[len(stack)-1]]]; ok { res[idx] = nums2[i] } //pop stack = stack[:len(stack)-1] } // push stack = append(stack, i) } return res } 42.</description></item><item><title>拓扑排序(选课)</title><link>https://scottlx.github.io/posts/%E6%8B%93%E6%89%91%E6%8E%92%E5%BA%8F/</link><pubDate>Wed, 12 Oct 2022 21:42:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E6%8B%93%E6%89%91%E6%8E%92%E5%BA%8F/</guid><description>207. 课程表 - 力扣（LeetCode）
+思路 课程之间的依赖关系可以用图来表示
+顶点：课程 边：有向的边，起点是前置课程，终点是后置课程 这种图叫做AOV（Activity On Vertex）网络，字面意思就是边代表了节点之间的活动的先后关系。
+按照题意，这个图是无环的（课程不能循环依赖），也就是DAG图。DAG图其实就是一颗树，只不过根节点是一个虚拟根节点（可以有多个起始根节点，但外面可以用一个虚拟根节点作为他们的父节点）。
+因此，可以用广度优先遍历（BFS）来求解。队列存放可以选的课程（入度为0），依次出队列（选课）。直到队列为空（没有课可以选了），看是否已经学完所有的课程
+入度：指向自己的边的数量，入度为0表示自己没有前置课程，可以入队列 出度：指向别人的边。用一个数据结构记录每个节点的出度列表。当某个节点出队列时，更新本节点的出度列表里所有节点的入度（-1） 代码 func canFinish(numCourses int, prerequisites [][]int) bool { //保存各课程的入度 空间O(v) indegree := make([]int, numCourses) // 保存各课程的出度列表 空间O(e) courseMp := make(map[int][]int) //时间 O(e) for _, pre := range(prerequisites) { indegree[pre[0]]++ courseMp[pre[1]] = append(courseMp[pre[1]], pre[0]) } var q []int // 已经学习了的课程的计数 var num int // 初始入度为0的课程加入队列 for course, depends := range(indegree) { if depends == 0 { q = append(q, course) } } //循环直到队列为空 时间O(v) for len(q) &amp;gt; 0 { // 出队列 finished := q[0] q = q[1:] num++ // 更新入度数据结构(slice) // 从出度课程列表中直接取受影响的课程 for _, course := range(courseMp[finished]) { indegree[course]-- // 入度-1后若为0，则可以入队列 if indegree[course] == 0 { q = append(q, course) } } } //是否学完 return num == numCourses } 时间复杂度：O (v+e) 空间复杂度: O(v+e) 若需要省空间，不需要省时间，可以不使用courseMp存放出度数组，每次重新遍历prerequisites 获取出度数组。此时处理每个节点都需要重新遍历所有的边，因此：</description></item><item><title>优势洗牌(田忌赛马)</title><link>https://scottlx.github.io/posts/%E4%BC%98%E5%8A%BF%E6%B4%97%E7%89%8C%E7%94%B0%E5%BF%8C%E8%B5%9B%E9%A9%AC/</link><pubDate>Sat, 08 Oct 2022 10:36:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E4%BC%98%E5%8A%BF%E6%B4%97%E7%89%8C%E7%94%B0%E5%BF%8C%E8%B5%9B%E9%A9%AC/</guid><description>870. 优势洗牌 - 力扣（LeetCode）
+思路 将nums1(自己的马)进行升序排序，得到下等马-&amp;gt;上等马的序列 贪心策略 若某个位置上自己的马比对手的马强，由于已经排过序了，已经是最下等的马了，因此使用这匹马 若某个位置上自己的马比对手的马弱，将该下等马放到最后的位置（对手的上等马的位置） 由于nums2的顺序固定（已知对手上场顺序），因此使用nums2的元素值对nums2的index进行排序，得到上场顺序（ids） 按照上场顺序(ids)依次写入ans数组中 代码 func advantageCount(nums1 []int, nums2 []int) []int { sort.Ints(nums1) n := len(nums1) ans := make([]int, n) ids := make([]int, n) for i := 0; i &amp;lt; n; i++ { ids[i] = i } sort.Slice(ids, func(i, j int) bool { return nums2[ids[i]] &amp;lt; nums2[ids[j]] }) left, right := 0, n-1 for _, v := range nums1 { if v &amp;gt; nums2[ids[left]] { ans[ids[left]] = v left++ } else { ans[ids[right]] = v right-- } } return ans } 总结 灵活运用不对数组进行真正的排序，而是获得排序后的index的顺序这一技巧</description></item><item><title>k8s源码分析</title><link>https://scottlx.github.io/posts/k8s%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90/</link><pubDate>Mon, 03 Oct 2022 16:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/k8s%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90/</guid><description>API Server Controller Device Plugin Informer Kube Proxy Pod Create Schduler(V1.13)</description></item><item><title>redis Server</title><link>https://scottlx.github.io/posts/redisserver/</link><pubDate>Mon, 03 Oct 2022 15:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/redisserver/</guid><description>数据库切换 默认会创建16个数据库，客户端通过select选取。但一般情况只用第0个数据库，切换容易导致误操作
+typedef struct redisDb { dict *dict; //键空间 dict *expires; //过期字典 int id; } redisDb; 所有键空间存储在redisDb的dict中，称为key space
+每个键是字符串对象，值是各种对象
+读写键操作 更新keyspace_hits和keyspace_misses，用来输出统计数据 更新键的LRU时间 若发现该键已经过期，则删除键 若该键被watch，标记键为dirty，使得监听者发现后重新拉数据 dirty计数器++，用来触发持久化和复制操作 过期字典的键是键空间的键字符串对象的指针（不会新分配空间），值是longlong类型的过期时间（毫秒精度的unix时间戳）
+判断是否过期：
+先在过期字典里取key的过期时间，再与当前时间比较
+删除策略 （redis同时采用惰性删除和定期删除策略，其中定期删除是随机取出一定数量的键做检查）：
+定时删除：过期时立刻删除（问题：要创建大量定时器，占用太多CPU，因此不合理） 惰性删除：获取键时若过期才删除 （问题：内存最不友好） 定期删除：定期对所有key进行检查并删除 （问题：如何确定定期时间，太快或太慢都不好） 持久化 解密Redis持久化 - justjavac - 博客园 (cnblogs.com)
+rdb 记录键值
+主服务器初始化加载时不会加载过期的键值，从服务器会加载过期的键值，但同步之后也会被清空掉
+主节点统一管理过期删除，从节点只能被动接收del命令，保证了数据一致性，但从节点里可能会有过期键值
+SAVE阻塞保存，BGSAVE用子进程保存
+自动保存：自动保存规则设置在一个列表中，表示一段时间内进行了多少次改动就满足保存规则
+每次写入会将db的dirty计数器加1，且每次保存会保存的时间戳lastsave。当距离lastsave的时间超过条件中设置的时间，比较dirty与规则中设置的改动次数，若满足则触发BGSAVE
+RDB数据格式
+REDIS db_version database 0 database 3 EOF check_sum 格式细节包括压缩算法略过
+aof 记录写命令（启动时优先选择加载aof）
+命令追加：按redis协议追加到aof_buf缓冲区中
+文件写入和同步：redis server主线程每次循环结束前，将缓冲区写入aof文件，并调用fsync落盘
+同步策略：always（每次都落盘），everysec(离上次落盘超过一秒触发落盘), no（靠操作系统自己落盘，一般是30s）
+过期但还未被删除的键值不会追加到aof中，只有惰性删除或定期删除显示调用del后才会追加DEL命令
+aof重写并不是对原文件进行重新整理，而是直接读取服务器现有的键值对，然后用一条命令去代替之前记录这个键值对的多条命令，生成一个新的文件后去替换原来的 AOF 文件。</description></item><item><title>redis 多节点</title><link>https://scottlx.github.io/posts/redis%E5%A4%9A%E8%8A%82%E7%82%B9/</link><pubDate>Mon, 03 Oct 2022 15:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/redis%E5%A4%9A%E8%8A%82%E7%82%B9/</guid><description>主从（复制） 同步 slave刚上线或断线重连时的第一次全量同步
+slave的客户端主动发送sync命令，触发master的BGSAVE，BGSAVE过程中将命令存入缓冲区，BGSAVE完成后发送RDB文件，slave完成RDB载入后再发送缓冲区的指令
+命令传播 完成同步后的增量同步
+master主动发送命令
+psync 优化后的sync，作为断线重连后的增量同步 slave发送psync命令，master返回+continue，之后发送断开期间执行的写命令
+偏移量 主节点和从节点各自维护一个偏移量，表示当前已接收数据的字节数。当从节点发现自身偏移量与主节点不一致时，主动向主节点发送psync命令
+复制缓冲区 主节点进行命令传播时(增量同步),会将写命令复制一份到缓冲区。且每个写命令都绑定一个对应的偏移量。从节点发送的psync中带有偏移量， 通过该偏移量在复制缓冲区中查找偏移量之后的写命令。如果查不到，则执行完整同步(sync)
+服务器运行ID 从节点向主节点注册自己的分布式ID，新上线的从节点若不在注册表内，则进行完整同步(sync)，否则进行部分重同步。
+同步过程 slaveof命令设置redisServer中的masterhost和masterport字段，之后主从连接由cron定时器任务里触发
+anetTcpConnect建立一个新的tcp连接 ping-pong命令测试连接 auth鉴权 发送端口号，主节点刷新client信息 psyn/sync 同步 命令传播 心跳 发送REPLCONF ACK命令，其中带有从节点的偏移量，可以检测命令丢失（命令丢失后主节点和从节点的偏移量会不一样）；收到心跳的时间戳用来监测网络延迟状态，若一定数量的从服务器的lag超过一定值，表示该主从集合不健康，不允许client写入 一致性 不是强一致性（cap），是最终一致性。用最终一致性换取了高吞吐量
+master与slave的同步存在数据不一致的时间窗口期 网络分区后哨兵模式或者集群模式的选主会产生脑裂 哨兵 多了一个哨兵节点进行主节点选举，触发从同步等工作，数据的同步还是主从模式 哨兵节点运行的是一个特殊模式的redis服务器，里面没有数据库。
+连接类型 命令连接
+订阅连接
+/*实例不是 Sentinel （主服务器或者从服务器） 并且以下条件的其中一个成立： 1）SENTINEL 未收到过这个服务器的 INFO 命令回复 2）距离上一次该实例回复 INFO 命令已经超过 info_period 间隔 那么向实例发送 INFO 命令 */ if ((ri-&amp;gt;flags &amp;amp; SRI_SENTINEL) == 0 &amp;amp;&amp;amp; ​ (ri-&amp;gt;info_refresh == 0 || ​ (now - ri-&amp;gt;info_refresh) &amp;gt; info_period)) { ​ /* Send INFO to masters and slaves, not sentinels.</description></item><item><title>redis 数据结构</title><link>https://scottlx.github.io/posts/redis%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84/</link><pubDate>Mon, 03 Oct 2022 15:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/redis%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84/</guid><description>此系列作为redis设计与实现的笔记，会将本人自认为重点部分单独拎出来，并加入本人的一些理解。
+SDS （simple dynamic string）
+等同于go里的slice
+struct sdshdr { int len; int free; char buf[]; } 优点：
+杜绝缓冲区溢出（free检验） 减少修改字符串时的内存分配次数（策略：小于1MB时，len=free，大于1MB时，free=1MB） 惰性空间释放（删除时实际空间并未缩减） 二进制安全（C字符串视/0为结束，不能用来存带/0的二进制数据） 部分兼容C字符串函数（默认在char数组最后加入/0，来兼容C字符串函数） 链表 双向链表，无环，保存头指针和尾指针，保存链表长度字段，链表节点的数据为void*指针
+字典 字典有type，每个type实现了一系列操作kv的函数（对比，生成哈希，删除，复制等）
+每个字典存有两个哈希表，一般用第一个ht[0]，第二个ht[1]用作rehash时的暂存容器
+哈希表由数组实现，数组存放kv链表头节点，链地址法解决冲突，冲突的新键值往表头加（由于没有指向表尾的指针）
+rehash标志位，当没有进行rehash时为-1
+key&amp;ndash;&amp;gt;(hashfunc)&amp;ndash;&amp;gt;hash&amp;ndash;&amp;gt;(hashmask)&amp;ndash;&amp;gt;index
+murmurhash算法：输入有规律情况还是能生成随机分布性的hash
+rehash 为ht[1]哈希表分配空间，空间的大小取决于当前ht[0]包含的键值数量以及要进行的操作，重新计算所有键值在ht[1]的索引并插入，插入后将ht[1]设置为ht[0]，并ht[1]指向新创的空白hash表
+负载因子=ht[0].used/ht[0].size
+何时进行扩展? 在进行持久化操作时(BGSAVE,BGREWRITEAOF)，负载因子&amp;gt;=5，普通场景下负载因子&amp;gt;=1
+何时进行收缩? 负载因子&amp;lt;0.1
+渐进式rehash 开始时rehashidx为0，表示正在进行rehash，rehash期间对字典的CRUD会顺带将ht[0]上的KV rehash到ht[1]，完成后rehashidx置为-1,表示已经完成。rehash期间的CRUD会先在ht[0]上查，查不到再去ht[1]查
+跳表 用来实现有序集合键，用作集群节点内部数据结构
+优点，相较于平衡树，实现简单，且rebalance的效率高（局部rebalance，只修改搜索路径上的节点）
+链表的扩展，维护了多个指向其他节点的指针，类似二分查找
+每个节点的层数是随机生成的，遍历时先走最上层的前进指针，若下一条节点的分值比要查找的分值高，则通过回退指针回到原来的节点并走下一层的前进指针，以此类推
+前进指针中存有跨度，累加所有跨度，当找到该节点后作为该节点在跳表中的排位（数组的index）
+比较分值时，分值可能相同，相同时比较value值（obj指向的sds的字典序）
+节点更新时，若score的改变未影响排序，则查找并直接改score，否则进行先删除后插入操作，会进行两次路径搜索
+整数集合 底层保存的整数为byte数组(int8)，按照解码类型(encoding)存入int16，int32或int64的数据
+只能存一种类型的数据，短int集合中插入长int后，往长int类型兼容（升级）
+节约内存，int16不需要分配int64的空间
+自适应灵活性，集合中添加长度更长的新元素，会自动升级，但不支持降级
+压缩列表 为了节约内存，将键值为小整数值和短字符串的entry按照特殊编排压缩为一段内存块
+先略过
+对象 创建键值对时，键和值都被封装成对象，并指明对象的类型，编码以及底层数据结构的指针
+key总是字符串对象，value可以是字符串对象，列表对象，哈希对象，集合对象，有序集合对象(zset)
+编码指定了底层数据结构, 每种对象类型有多种编码的实现
+字符串对象 long：value是数字，可以用long存
+raw：value是字符串，长度大于32byte，用sds存，sds的内存是另外一块，和redisObject不连续
+embstr：value是字符串，长度小于32byte，用sds存，sds的内存与redisObject的内存连续 （好处：减少分配和释放内存的次数，增加缓存命中率；坏处：没有实现写方法，只读，修改的话需要先转raw）
+列表对象 ziplist：redisObject的ptr指向压缩列表（条件：每个字符串长度&amp;lt;64byte且列表长度&amp;lt;512）
+linkedlist：构造元素为字符串对象的双向链表（列表对象中嵌套了字符串对象）</description></item><item><title>gobpf不完整使用指南</title><link>https://scottlx.github.io/posts/gobpf/</link><pubDate>Mon, 03 Oct 2022 14:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/gobpf/</guid><description>编译过程 安装llvm-10,clang-10 apt-install llvm-10 clang-10
+下载bpf2go go install github.com/cilium/ebpf/cmd/bpf2go@latest 修改bpf程序的include
+#include &amp;#34;common.h&amp;#34; 编译时将bpd的headers包含进来 GOPACKAGE=main bpf2go -cc clang-10 -cflags &amp;#39;-O2 -g -Wall -Werror&amp;#39; -target bpfel,bpfeb bpf helloworld.bpf.c -- -I /root/ebpf/examples/headers 得到大端和小端两个版本的ELF文件，之后在go程序里加载即可。cpu一般都是小端。
+内核版本要求 经测试一些gobpf的一些syscall不适配较低版本的内核（例如5.8的BPF_LINK_CREATE会报参数错误），建议使用最新版本内核5.19
+bpf_map 用户态程序首先加载bpf maps，再将bpf maps绑定到fd上。elf文件中的realocation table用来将代码中的bpf maps重定向至正确的fd上,用户程序在fd上发起bpf syscall
+map的value尽量不要存复合数据结构，若bpf程序和用户态程序共用一个头文件，用户态程序调用bpf.Lookup时由于结构体变量unexported而反射失败
+pinning object 将map挂载到/sys/fs/bpf
+ebpf.CollectionOptions{ Maps: ebpf.MapOptions{ // Pin the map to the BPF filesystem and configure the // library to automatically re-write it in the BPF // program so it can be re-used if it already exists or // create it if not PinPath: pinPath 其他用户态程序获取pinned map的fd</description></item><item><title>初识ebpf</title><link>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86ebpf/</link><pubDate>Mon, 03 Oct 2022 14:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86ebpf/</guid><description>摘自
+eBPF 用户空间虚拟机实现相关 | Blog (forsworns.github.io)
+[ 译] Cilium：BPF 和 XDP 参考指南（2021） (arthurchiao.art)
+hook point 可以插入bpf代码的位置
+enum bpf_prog_type { BPF_PROG_TYPE_UNSPEC, BPF_PROG_TYPE_SOCKET_FILTER, BPF_PROG_TYPE_KPROBE, BPF_PROG_TYPE_SCHED_CLS, BPF_PROG_TYPE_SCHED_ACT, BPF_PROG_TYPE_TRACEPOINT, BPF_PROG_TYPE_XDP, BPF_PROG_TYPE_PERF_EVENT, BPF_PROG_TYPE_CGROUP_SKB, BPF_PROG_TYPE_CGROUP_SOCK, BPF_PROG_TYPE_LWT_IN, BPF_PROG_TYPE_LWT_OUT, BPF_PROG_TYPE_LWT_XMIT, BPF_PROG_TYPE_SOCK_OPS, BPF_PROG_TYPE_SK_SKB, }; 程序类型 bpf_prog_type BPF prog 入口参数（R1) 程序类型 BPF_PROG_TYPE_SOCKET_FILTER struct __sk_buff 用于过滤进出口网络报文，功能上和 cBPF 类似。 BPF_PROG_TYPE_KPROBE struct pt_regs 用于 kprobe 功能的 BPF 代码。 BPF_PROG_TYPE_TRACEPOINT 这类 BPF 的参数比较特殊，根据 tracepoint 位置的不同而不同。 用于在各个 tracepoint 节点运行。 BPF_PROG_TYPE_XDP struct xdp_md 用于控制 XDP(eXtreme Data Path)的 BPF 代码。 BPF_PROG_TYPE_PERF_EVENT struct bpf_perf_event_data 用于定义 perf event 发生时回调的 BPF 代码。 BPF_PROG_TYPE_CGROUP_SKB struct __sk_buff 用于在 network cgroup 中运行的 BPF 代码。功能上和 Socket_Filter 近似。具体用法可以参考范例 test_cgrp2_attach。 BPF_PROG_TYPE_CGROUP_SOCK struct bpf_sock 另一个用于在 network cgroup 中运行的 BPF 代码，范例 test_cgrp2_sock2 中就展示了一个利用 BPF 来控制 host 和 netns 间通信的例子。 BPF 程序类型就是由 BPF side 的代码的函数参数确定的，比如写了一个函数，参数是 struct __sk_buff 类型的，它就是一个 BPF_PROG_TYPE_SOCKET_FILTER 类型的 BPF 程序</description></item><item><title>基于事务处理的vpp管控面agent</title><link>https://scottlx.github.io/posts/%E5%9F%BA%E4%BA%8E%E4%BA%8B%E5%8A%A1%E5%A4%84%E7%90%86%E7%9A%84vpp%E7%AE%A1%E6%8E%A7%E9%9D%A2agent/</link><pubDate>Mon, 03 Oct 2022 13:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E5%9F%BA%E4%BA%8E%E4%BA%8B%E5%8A%A1%E5%A4%84%E7%90%86%E7%9A%84vpp%E7%AE%A1%E6%8E%A7%E9%9D%A2agent/</guid><description>问题背景 vpp作为vrouter，类似物理交换机，各配置项依赖关系复杂。以下为vpp配置abf策略路由的例子：
+typedef abf_policy { u32 policy_id; u32 acl_index; //依赖acl u8 n_paths; vl_api_fib_path_t paths[n_paths]; }; autoreply define abf_policy_add_del { option status=&amp;#34;in_progress&amp;#34;; u32 client_index; u32 context; bool is_add; vl_api_abf_policy_t policy; }; typedef abf_itf_attach { u32 policy_id; vl_api_interface_index_t sw_if_index; //依赖interface，interface又会依赖其他资源 u32 priority; bool is_ipv6; }; 可以看到，策略路由首先依赖acl规则，之后将abf绑定至接口时需要依赖对应interface的index，且创建interface又需要依赖其他资源（绑定vrf等）。
+除此之外，vpp配置写入存在中间状态与崩溃的问题，且无法避免。“崩溃”类似数据库写入的概念。数据必须要成功写入磁盘、磁带等持久化存储器后才能拥有持久性，只存储在，内存中的数据，一旦遇到应用程序忽然崩溃，或者数据库、操作系统一侧的崩溃，甚至是机器突然断电宕机等情况就会丢失，这些意外情况都统称为“崩溃”。
+因此，为了解决vpp（物理交换机也适用）各配置项的依赖关系，以及保证原子性和持久性，实现崩溃恢复，需要在管控面agent侧处理好上述问题。
+事务处理 本人对分布式事务领域涉及不深，以下摘自于
+本地事务（也可称为局部事务），是单个服务使用单个数据源场景，也就是最基本的本地数据落盘的事务。本地事务要求底层数据源需要支持事务的开启、终止、提交、回滚、嵌套等。在数据库领域（ARIES理论，基于语义的恢复与隔离），感兴趣的可以研究下commiting logging机制（OceanBase）和shadow paging
+全局事务，是单个服务多个数据源场景。主要目的是为了解决事务一致性问题，并做到统一提交，统一回滚的功能。例如我有一个全局事务需要在A表中写入记录a（本地事务A），再在B表中写入记录b（本地事务B），A表和B表分别在两台物理机的磁盘上。在数据存储领域由X/Open XA对此发布了一个事务处理架构，且当前很多分布式事务处理框架都是基于此来设计的。主要核心如下：
+全局事务管理器（Transaction Manager，TM）：协调全局事务 局部资源管理器（Resource Manaeger，RM）：驱动本地事务 模型：XA，TCC，SAGA，AT 。。。 感兴趣的可以研究下阿里的seata。
+事务处理视角看待vpp管控面 本地事务 vpp的配置是内存上的配置，不需要落盘。 vpp的每个资源的api可视为一个数据源 数据源没有实现事务的开启、终止、提交、回滚、嵌套、设置隔离级别等能力，只提供了下发，删除，读取接口 上述数据源未提供的能力需要agent来补齐 全局事务 agent暴露给上层的接口可视为全局事务 有些全局事务只涉及单个数据源，有些全局事务涉及多个数据源 agent内部需要实现TM，将全局事务转为有序的本地事务列表 agent内部需要实现RM，调用vpp api，驱动本地事务的执行 举例：</description></item><item><title>初识srv6</title><link>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86srv6/</link><pubDate>Sat, 01 Oct 2022 09:18:21 +0800</pubDate><guid>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86srv6/</guid><description>翻译自SRv6 Network Programming draft-filsfils-spring-srv6-network-programming-07
+SRH Segment Routing Header
+SRH在一个报文中可以有多个
+NH ipv6 next-header field
+Srv6的Routing Header的type是4，IP6 header的NH字段是43
+SID 编排链节点的ID，srv6节点的SID table里面保存自己在各个编排链内的SID。local SID可以是设备外部接口（不会是内部接口）的ipv6地址。例如已经在外部接口配置了地址A和地址B，内部loopback配置了地址C。地址A和地址B会默认被加入到SID Table。
+地址B可以是路由不可达的，为什么？
+可以将地址A理解成全局segments，地址B为本地segments。只要报文在发送时加入了SID list&amp;lt;A,B&amp;gt;，A在B的前面，只要A对外路由可达，报文就会被送到A，然后在本地进行下一步的处理（发往本地的B）
+(SA,DA) (S3, S2, S1; SL)
+S1是第一跳，S3是最后一跳。SL剩下几跳，也可理解为下一个SID节点的下标。例如SL=0， 表示SRH[0]=S3，下一个SID处理节点的ip地址是S3
+SID格式 SID Table中并不是以Ip的形式保存SID的
+LOC:FUNCT:ARGS::
+function 每个SID可以绑定多个function。function与SID的绑定关系存在SID Table中。这个特性决定了SRV6的高度可编程性。
+function太多，不一一列出，总结下规律
+带有D的，表示Decapsulation，如果SL==0（已经是最后一跳）且NH!=SRH(没有嵌套另一个SRH)，且SRH的ENH（下一层header类别）符合function的定义(例如DT6，ENH必须是41(ipv6 encapsulation))，则剥去SRH
+带有T的，表示table，查对应的fib表
+带有X的，表示cross-connect，往邻接表对应的Ip地址发（直接拿mac）
+带V的，表示Vlan，往对应Vlan发（改Vlan头部）
+带B的，表示bond，insert在老的SRH和Ipv6 Header之间新插入一个SRH，将DA改为新的SRH的第一个segment；encap则是在最外面新插入一个ipv6头部，新ipv6头部SA是内部ipv6头部的SA，DA是新ipv6头部下的SRH的第一跳</description></item><item><title/><link>https://scottlx.github.io/about/aboutme/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://scottlx.github.io/about/aboutme/</guid><description/></item><item><title/><link>https://scottlx.github.io/tools/tools/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://scottlx.github.io/tools/tools/</guid><description/></item><item><title>归档</title><link>https://scottlx.github.io/archives/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://scottlx.github.io/archives/</guid><description/></item></channel></rss>

@@ -1,150 +1,46 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>K8s on windseek</title><link>https://scottlx.github.io/tags/k8s/</link><description>Recent content in K8s on windseek</description><generator>Hugo</generator><language>zh-CN</language><lastBuildDate>Thu, 06 Mar 2025 15:49:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/k8s/index.xml" rel="self" type="application/rss+xml"/><item><title>bpf lpm trie</title><link>https://scottlx.github.io/posts/bpf_lpm_trie/</link><pubDate>Thu, 06 Mar 2025 15:49:00 +0800</pubDate><guid>https://scottlx.github.io/posts/bpf_lpm_trie/</guid><description>&lt;p>lpm有多种实现方式，最常用的是用trie。当然也会有更简单的实现方式，例如某些特定场景用多重哈希表就能解决（ipv4地址，32个掩码对应32个哈希表）&lt;/p>
-&lt;p>从4.11内核版本开始，bpf map引入了&lt;code>BPF_MAP_TYPE_LPM_TRIE&lt;/code>&lt;/p>
-&lt;p>主要是用于匹配ip地址，内部是将数据存储在一个不平衡的trie中，key使用&lt;code>prefixlen,data&lt;/code>&lt;/p>
-&lt;p>data是以大端网络序存储的，data[0]存的是msb。&lt;/p>
-&lt;p>prefixlen支持8的整数倍，最高可以是2048。因此除了ip匹配，还可以用来做端口，协议，vpcid等等的扩充匹配。在应用层面上除了做路由表，还可以作为acl，policy等匹配过滤的底层实现&lt;/p>
-&lt;h4 id="使用方式">使用方式&lt;/h4>
-&lt;p>
-&lt;a href="https://docs.kernel.org/next/bpf/map_lpm_trie.html" target="_blank" rel="noopener">BPF_MAP_TYPE_LPM_TRIE — The Linux Kernel documentation&lt;/a>&lt;/p>
-&lt;p>除了上述基本的Ipv4的使用方式，扩展使用方式可以参考一下cillium中IPCACHE_MAP的使用&lt;/p>
-&lt;p>首先是map的定义&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">struct&lt;/span> ipcache_key {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">struct&lt;/span> bpf_lpm_trie_key lpm_key;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	__u16 cluster_id;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	__u8 pad1;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	__u8 family;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">union&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">struct&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			__u32		ip4;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			__u32		pad4;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			__u32		pad5;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			__u32		pad6;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		};
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">union&lt;/span> v6addr	ip6;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	};
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>} __packed;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">/* Global IP -&amp;gt; Identity map for applying egress label-based policy */&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">struct&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__uint&lt;/span>(type, BPF_MAP_TYPE_LPM_TRIE);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__type&lt;/span>(key, &lt;span style="color:#719e07">struct&lt;/span> ipcache_key);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__type&lt;/span>(value, &lt;span style="color:#719e07">struct&lt;/span> remote_endpoint_info);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__uint&lt;/span>(pinning, LIBBPF_PIN_BY_NAME);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__uint&lt;/span>(max_entries, IPCACHE_MAP_SIZE);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__uint&lt;/span>(map_flags, BPF_F_NO_PREALLOC);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>} IPCACHE_MAP __section_maps_btf;
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>可以看到cillium将v4和v6合并成一个map查询，匹配条件并带上了&lt;code>cluster_id&lt;/code>&lt;/p></description></item><item><title>cilium datapath</title><link>https://scottlx.github.io/posts/cilium-datapath/</link><pubDate>Mon, 03 Mar 2025 18:15:00 +0800</pubDate><guid>https://scottlx.github.io/posts/cilium-datapath/</guid><description>&lt;h3 id="hook点">hook点&lt;/h3>
-&lt;p>大部分是挂载位置是tc，tc是网络协议栈初始处理挂载点&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">// linux source code: dev.c
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span>__netif_receive_skb_core
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">|&lt;/span> &lt;span style="color:#268bd2">list_for_each_entry_rcu&lt;/span>(ptype, &lt;span style="color:#719e07">&amp;amp;&lt;/span>ptype_all, list) {...} &lt;span style="color:#586e75">// packet capture
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">|&lt;/span> do_xdp_generic &lt;span style="color:#586e75">// handle generic xdp
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">|&lt;/span> sch_handle_ingress &lt;span style="color:#586e75">// tc ingress
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">|&lt;/span> tcf_classify
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">|&lt;/span> __tcf_classify &lt;span style="color:#586e75">// ebpf program is working here
-&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>如果没有下发policy，xdp就不会挂载各类filter程序&lt;/p>
-&lt;p>&lt;img src="https://rexrock.github.io/post-images/1614297388691.png" alt="cilium datapath">&lt;/p>
-&lt;h3 id="网络设备">网络设备&lt;/h3>
-&lt;p>cillium的网络方案不像常规的网桥模式（ovs，linux bridge），datapath不是一个完整的run to completion，而是分散在各个虚拟接口上，类似pipeline模式&lt;/p>
-&lt;p>cillium_host: 集群内所有podCIDR的网关，地址对容器可见&lt;/p>
-&lt;p>cilium_net: cilium_host的veth对，ipvlan模式才会用到？&lt;/p>
-&lt;p>clilium_vxlan: 用来提供Pod跨节点通信overlay封装&lt;/p>
-&lt;p>lxcXXXX: 容器veth对在主机侧的接口&lt;/p>
-&lt;h3 id="同节点pod2pod">同节点pod2pod&lt;/h3>
-&lt;p>cillium_host是所有pod的网关，因此会先arp request该地址。arp相应其实是在lxc处被代答了，arp报文不会走到cillium_host&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">// bpf_lxc.c
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span>__section_entry
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#dc322f">int&lt;/span> &lt;span style="color:#268bd2">cil_from_container&lt;/span>(&lt;span style="color:#719e07">struct&lt;/span> __ctx_buff &lt;span style="color:#719e07">*&lt;/span>ctx)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>{
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	...
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">case&lt;/span> &lt;span style="color:#268bd2">bpf_htons&lt;/span>(ETH_P_ARP)&lt;span style="color:#719e07">:&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		ret &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#268bd2">tail_call_internal&lt;/span>(ctx, CILIUM_CALL_ARP, &lt;span style="color:#719e07">&amp;amp;&lt;/span>ext_err);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">break&lt;/span>;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	...
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#268bd2">__section_tail&lt;/span>(CILIUM_MAP_CALLS, CILIUM_CALL_ARP)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#dc322f">int&lt;/span> &lt;span style="color:#268bd2">tail_handle_arp&lt;/span>(&lt;span style="color:#719e07">struct&lt;/span> __ctx_buff &lt;span style="color:#719e07">*&lt;/span>ctx)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>{
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">union&lt;/span> macaddr mac &lt;span style="color:#719e07">=&lt;/span> THIS_INTERFACE_MAC;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">union&lt;/span> macaddr smac;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	__be32 sip;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	__be32 tip;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">/* Pass any unknown ARP requests to the Linux stack */&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">if&lt;/span> (&lt;span style="color:#719e07">!&lt;/span>&lt;span style="color:#268bd2">arp_validate&lt;/span>(ctx, &lt;span style="color:#719e07">&amp;amp;&lt;/span>mac, &lt;span style="color:#719e07">&amp;amp;&lt;/span>smac, &lt;span style="color:#719e07">&amp;amp;&lt;/span>sip, &lt;span style="color:#719e07">&amp;amp;&lt;/span>tip))
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">return&lt;/span> CTX_ACT_OK;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">/*
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * The endpoint is expected to make ARP requests for its gateway IP.
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * Most of the time, the gateway IP configured on the endpoint is
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * IPV4_GATEWAY but it may not be the case if after cilium agent reload
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * a different gateway is chosen. In such a case, existing endpoints
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * will have an old gateway configured. Since we don&amp;#39;t know the IP of
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * previous gateways, we answer requests for all IPs with the exception
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * of the LXC IP (to avoid specific problems, like IP duplicate address
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * detection checks that might run within the container).
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 */&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">if&lt;/span> (tip &lt;span style="color:#719e07">==&lt;/span> LXC_IPV4)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">return&lt;/span> CTX_ACT_OK;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">return&lt;/span> &lt;span style="color:#268bd2">arp_respond&lt;/span>(ctx, &lt;span style="color:#719e07">&amp;amp;&lt;/span>mac, tip, &lt;span style="color:#719e07">&amp;amp;&lt;/span>smac, sip, &lt;span style="color:#2aa198">0&lt;/span>);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>普通ipv4报文，走handle_ipv4_from_lxc&lt;/p></description></item><item><title>contiv memif</title><link>https://scottlx.github.io/posts/contiv-memif/</link><pubDate>Fri, 07 Apr 2023 15:10:00 +0800</pubDate><guid>https://scottlx.github.io/posts/contiv-memif/</guid><description>&lt;h3 id="contiv-memif">contiv memif&lt;/h3>
-&lt;p>contiv的cni与device plugin相结合，实现了：&lt;/p>
-&lt;ol>
-&lt;li>Pod能同时接入不止一张网卡&lt;/li>
-&lt;li>Pod接入的网卡可以是tap，veth，memif&lt;/li>
-&lt;/ol>
-&lt;h4 id="deviceplugin">devicePlugin&lt;/h4>
-&lt;p>Device Plugin实际是一个运行在Kubelet所在的Node上的gRPC server，通过Unix Socket、基于以下（简化的）API来和Kubelet的gRPC server通信，并维护对应设备资源在当前Node上的注册、发现、分配、卸载。
-其中，&lt;code>ListAndWatch()&lt;/code>负责对应设备资源的discovery和watch；&lt;code>Allocate()&lt;/code>负责设备资源的分配。&lt;/p>
-&lt;p>&lt;img src="https://scottlx.github.io/img/vpp-agent/6F9684EB-7E5E-4b77-9316-32D5C92FD07E.png" alt="6F9684EB-7E5E-4b77-9316-32D5C92FD07E">&lt;/p>
-&lt;h4 id="insight">Insight&lt;/h4>
-&lt;p>&lt;img src="https://scottlx.github.io/img/vpp-agent/contiveCNI.drawio.png" alt="contiveCNI.drawio">&lt;/p>
-&lt;h5 id="kubelet">kubelet&lt;/h5>
-&lt;p>kubelet接收上图格式的API。API中的annotations定义了pod的网卡个数与类型，resources中定义了所需要的device plugin的资源，也就是memif。&lt;/p>
-&lt;p>kubelet执行常规的syncPod流程，调用contiv cni创建网络。此时会在请求中将annotation传递给cni。&lt;/p>
-&lt;p>同时，agent的DevicePluginServer会向kubelet注册rpc服务，注册contivpp.io/memif的设备资源，从而kubelet的device manager会grpc请求DevicePluginServer获取contivpp.io/memif设备资源。&lt;/p>
-&lt;h5 id="cni">cni&lt;/h5>
-&lt;p>cni实现了github.com/containernetworking/cni标准的add和del接口。实际上做的事情只是将cni请求转换为了对agent的grpc请求：解析args，并通过grpc调用agent的接口发送cniRequest，再根据grpc的返回结果，将结果再次转换成标准cni接口的返回格式&lt;/p>
-&lt;h5 id="agent">Agent&lt;/h5>
-&lt;h6 id="podmanager">podmanager&lt;/h6>
-&lt;p>podmanager实现了上述cni调用的grpc server，主要任务是将cni的request转换为内部的event数据格式，供event loop处理。&lt;/p>
-&lt;p>request是cni定义的请求数据类型，详见https://github.com/containernetworking/cni/blob/master/SPEC.md#parameters&lt;/p>
-&lt;p>event则是agent内部的关于pod事务模型，类似原生kvScheduler的针对vpp api的transaction。每一种event都会对应一个plugin去实现他的handler，供event loop调用。&lt;/p>
-&lt;h6 id="event-loop">event loop&lt;/h6>
-&lt;p>event loop是整个contiv agent的核心处理逻辑，北向对接event queue，南向调用各个EventHandler，将event转换为kvScheduler的事务。&lt;/p>
-&lt;p>执行了以下步骤：&lt;/p>
-&lt;ol>
-&lt;li>对事件的预处理，包括校验，判断事件类型，加载必要的配置等&lt;/li>
-&lt;li>判断是否是更新的事件&lt;/li>
-&lt;li>对事件的handler进行排序，并生成正向或回退的handler顺序&lt;/li>
-&lt;li>与本次事件无关的handler过滤掉&lt;/li>
-&lt;li>创建对这次事件的记录record&lt;/li>
-&lt;li>打印上述步骤生成的所有事件相关信息&lt;/li>
-&lt;li>执行事件更新或同步，生成vpp-agent里的事务&lt;/li>
-&lt;li>将contiv生成的配置与外部配置进行merge，得到最终配置&lt;/li>
-&lt;li>将最终配置的vpp-agent事务commit到agent的kvscheduler&lt;/li>
-&lt;li>若事务失败，将已经完成的操作进行回退&lt;/li>
-&lt;li>完成事件，输出记录record与计时&lt;/li>
-&lt;li>打印回退失败等不可恢复的异常&lt;/li>
-&lt;li>若开启一致性检查，则最好再执行一次同步校验&lt;/li>
-&lt;/ol>
-&lt;h6 id="devicemanager">devicemanager&lt;/h6>
-&lt;p>devicemanager既实现了对接kublet的DevicePluginServer，又实现了AllocateDevice类型的event的handler。换句话说是自己产生并处理自己的event。&lt;/p>
-&lt;p>主要业务逻辑：&lt;/p>
-&lt;ol>
-&lt;li>
-&lt;p>创建memif socket文件的目录并挂载至容器&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>创建连接socket的secret。&lt;/p>
-&lt;/li>
-&lt;/ol>
-&lt;p>上述的创建并不是真实的创建，而是把需要的信息(event.Envs, event.Annotations, event.Mounts)通过grpc返回给kublet，让kubelet去创建。&lt;/p>
-&lt;p>devicemanager还会将上述memif的信息保存在缓存中，供其他插件来获取。若缓存中信息不存在，则会调用kubelet的api获取信息。&lt;/p>
-&lt;h6 id="ipnet">ipNet&lt;/h6>
-&lt;p>ipNet插件主要负责node和pod中各类网卡的创建销毁，vxlan的分配，vrf的分配等&lt;/p>
-&lt;p>更新网卡时，ipnet会读取annotation中kv，判断网卡类型。若类型为memif，则会向deviceManager获取当前pod里各容器的memifInfo，之后根据memifInfo里的socket地址和secret，创建memif类型的网卡事务，并 push 至kvscheduler&lt;/p></description></item></channel></rss>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>k8s on windseek</title><link>https://scottlx.github.io/tags/k8s/</link><description>Recent content in k8s on windseek</description><generator>Hugo -- gohugo.io</generator><language>zh-CN</language><lastBuildDate>Mon, 26 May 2025 17:53:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/k8s/index.xml" rel="self" type="application/rss+xml"/><item><title>深入剖析cilium monitor机制</title><link>https://scottlx.github.io/posts/%E6%B7%B1%E5%85%A5%E5%89%96%E6%9E%90cilium-monitor%E6%9C%BA%E5%88%B6/</link><pubDate>Mon, 26 May 2025 17:53:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E6%B7%B1%E5%85%A5%E5%89%96%E6%9E%90cilium-monitor%E6%9C%BA%E5%88%B6/</guid><description>可调试性 报文转发面组件中，可调试性十分关键。开发阶段可能可以使用gdb（ebpf甚至不能用gdb，只能用trace_printk），log等方式进行调试，但到了生产环境，以下几个功能是必须要完备的：
+抓包手段
+按照网卡抓包 按照流进行抓包 按照特定过滤条件抓包，例如源目的地址，端口，协议号等 报文计数
+收发包计数：rx，tx阶段计数 丢包计数：按照错误码进行区分 特定观测点计数：一些重要转发函数，例如l3_fwd, arp_response等 流日志
+流量方向：egress/ingress session信息：五元组，nat信息，tcp状态等 其他必要的上下文：例如转发表项查找的结果，构造的action，硬件卸载标记等 linux perf_events ebpf perf基于linux perf_event子系统。epbf通知用户态拷贝数据时基于perf_events的
+perf buffer ebpf中提供了内核和用户空间之间高效地交换数据的机制：perf buffer。它是一种per-cpu的环形缓冲区，当我们需要将ebpf收集到的数据发送到用户空间记录或者处理时，就可以用perf buffer来完成。它还有如下特点：
+能够记录可变长度数据记； 能够通过内存映射的方式在用户态读取读取数据，而无需通过系统调用陷入到内核去拷贝数据； 实现epoll通知机制 因此在cilium中，实现上述调试手段的思路，就是在转发面代码中构造相应的event到EVENTS_MAP，之后通过别的工具去读取并解析EVENTS_MAP中的数据
+EVENTS_MAP定义如下: bpf/lib/events.h
+struct { __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY); __uint(key_size, sizeof(__u32)); __uint(value_size, sizeof(__u32)); __uint(pinning, LIBBPF_PIN_BY_NAME); __uint(max_entries, __NR_CPUS__); } EVENTS_MAP __section_maps_btf; key是cpu的编号，因此大小是u32；value一般是文件描述符fd，关联一个perf event，因此也是u32
+数据面代码构造好data之后，使用helper function: bpf_perf_event_output通知用户态代码拷贝数据
+下面是cilium代码中封装好的event输出函数，最终就是调用的bpf_perf_event_output
+// bpf/include/bpf/ctx/skb.h #define ctx_event_output skb_event_output // bpf/include/bpf/helpers_skb.h /* Events for user space */ static int BPF_FUNC_REMAP(skb_event_output, struct __sk_buff *skb, void *map, __u64 index, const void *data, __u32 size) = (void *)BPF_FUNC_perf_event_output; //对应的func id 是 25 // /usr/include/linux/bpf.</description></item><item><title>bpf lpm trie</title><link>https://scottlx.github.io/posts/bpf_lpm_trie/</link><pubDate>Thu, 06 Mar 2025 15:49:00 +0800</pubDate><guid>https://scottlx.github.io/posts/bpf_lpm_trie/</guid><description>lpm有多种实现方式，最常用的是用trie。当然也会有更简单的实现方式，例如某些特定场景用多重哈希表就能解决（ipv4地址，32个掩码对应32个哈希表）
+从4.11内核版本开始，bpf map引入了BPF_MAP_TYPE_LPM_TRIE
+主要是用于匹配ip地址，内部是将数据存储在一个不平衡的trie中，key使用prefixlen,data
+data是以大端网络序存储的，data[0]存的是msb。
+prefixlen支持8的整数倍，最高可以是2048。因此除了ip匹配，还可以用来做端口，协议，vpcid等等的扩充匹配。在应用层面上除了做路由表，还可以作为acl，policy等匹配过滤的底层实现
+使用方式 BPF_MAP_TYPE_LPM_TRIE — The Linux Kernel documentation
+除了上述基本的Ipv4的使用方式，扩展使用方式可以参考一下cillium中IPCACHE_MAP的使用
+首先是map的定义
+struct ipcache_key { struct bpf_lpm_trie_key lpm_key; __u16 cluster_id; __u8 pad1; __u8 family; union { struct { __u32 ip4; __u32 pad4; __u32 pad5; __u32 pad6; }; union v6addr ip6; }; } __packed; /* Global IP -&amp;gt; Identity map for applying egress label-based policy */ struct { __uint(type, BPF_MAP_TYPE_LPM_TRIE); __type(key, struct ipcache_key); __type(value, struct remote_endpoint_info); __uint(pinning, LIBBPF_PIN_BY_NAME); __uint(max_entries, IPCACHE_MAP_SIZE); __uint(map_flags, BPF_F_NO_PREALLOC); } IPCACHE_MAP __section_maps_btf; 可以看到cillium将v4和v6合并成一个map查询，匹配条件并带上了cluster_id</description></item><item><title>cilium datapath</title><link>https://scottlx.github.io/posts/cilium-datapath/</link><pubDate>Mon, 03 Mar 2025 18:15:00 +0800</pubDate><guid>https://scottlx.github.io/posts/cilium-datapath/</guid><description>hook点 大部分是挂载位置是tc，tc是网络协议栈初始处理挂载点
+// linux source code: dev.c __netif_receive_skb_core | list_for_each_entry_rcu(ptype, &amp;amp;ptype_all, list) {...} // packet capture | do_xdp_generic // handle generic xdp | sch_handle_ingress // tc ingress | tcf_classify | __tcf_classify // ebpf program is working here 如果没有下发policy，xdp就不会挂载各类filter程序
+网络设备 cillium的网络方案不像常规的网桥模式（ovs，linux bridge），datapath不是一个完整的run to completion，而是分散在各个虚拟接口上，类似pipeline模式
+cillium_host: 集群内所有podCIDR的网关，地址对容器可见
+cilium_net: cilium_host的veth对，ipvlan模式才会用到？
+clilium_vxlan: 用来提供Pod跨节点通信overlay封装
+lxcXXXX: 容器veth对在主机侧的接口
+同节点pod2pod cillium_host是所有pod的网关，因此会先arp request该地址。arp相应其实是在lxc处被代答了，arp报文不会走到cillium_host
+// bpf_lxc.c __section_entry int cil_from_container(struct __ctx_buff *ctx) { ... case bpf_htons(ETH_P_ARP): ret = tail_call_internal(ctx, CILIUM_CALL_ARP, &amp;amp;ext_err); break; .</description></item><item><title>contiv memif</title><link>https://scottlx.github.io/posts/contiv-memif/</link><pubDate>Fri, 07 Apr 2023 15:10:00 +0800</pubDate><guid>https://scottlx.github.io/posts/contiv-memif/</guid><description>contiv memif contiv的cni与device plugin相结合，实现了：
+Pod能同时接入不止一张网卡 Pod接入的网卡可以是tap，veth，memif devicePlugin Device Plugin实际是一个运行在Kubelet所在的Node上的gRPC server，通过Unix Socket、基于以下（简化的）API来和Kubelet的gRPC server通信，并维护对应设备资源在当前Node上的注册、发现、分配、卸载。 其中，ListAndWatch()负责对应设备资源的discovery和watch；Allocate()负责设备资源的分配。
+Insight kubelet kubelet接收上图格式的API。API中的annotations定义了pod的网卡个数与类型，resources中定义了所需要的device plugin的资源，也就是memif。
+kubelet执行常规的syncPod流程，调用contiv cni创建网络。此时会在请求中将annotation传递给cni。
+同时，agent的DevicePluginServer会向kubelet注册rpc服务，注册contivpp.io/memif的设备资源，从而kubelet的device manager会grpc请求DevicePluginServer获取contivpp.io/memif设备资源。
+cni cni实现了github.com/containernetworking/cni标准的add和del接口。实际上做的事情只是将cni请求转换为了对agent的grpc请求：解析args，并通过grpc调用agent的接口发送cniRequest，再根据grpc的返回结果，将结果再次转换成标准cni接口的返回格式
+Agent podmanager podmanager实现了上述cni调用的grpc server，主要任务是将cni的request转换为内部的event数据格式，供event loop处理。
+request是cni定义的请求数据类型，详见https://github.com/containernetworking/cni/blob/master/SPEC.md#parameters
+event则是agent内部的关于pod事务模型，类似原生kvScheduler的针对vpp api的transaction。每一种event都会对应一个plugin去实现他的handler，供event loop调用。
+event loop event loop是整个contiv agent的核心处理逻辑，北向对接event queue，南向调用各个EventHandler，将event转换为kvScheduler的事务。
+执行了以下步骤：
+对事件的预处理，包括校验，判断事件类型，加载必要的配置等 判断是否是更新的事件 对事件的handler进行排序，并生成正向或回退的handler顺序 与本次事件无关的handler过滤掉 创建对这次事件的记录record 打印上述步骤生成的所有事件相关信息 执行事件更新或同步，生成vpp-agent里的事务 将contiv生成的配置与外部配置进行merge，得到最终配置 将最终配置的vpp-agent事务commit到agent的kvscheduler 若事务失败，将已经完成的操作进行回退 完成事件，输出记录record与计时 打印回退失败等不可恢复的异常 若开启一致性检查，则最好再执行一次同步校验 devicemanager devicemanager既实现了对接kublet的DevicePluginServer，又实现了AllocateDevice类型的event的handler。换句话说是自己产生并处理自己的event。
+主要业务逻辑：
+创建memif socket文件的目录并挂载至容器
+创建连接socket的secret。
+上述的创建并不是真实的创建，而是把需要的信息(event.Envs, event.Annotations, event.Mounts)通过grpc返回给kublet，让kubelet去创建。
+devicemanager还会将上述memif的信息保存在缓存中，供其他插件来获取。若缓存中信息不存在，则会调用kubelet的api获取信息。
+ipNet ipNet插件主要负责node和pod中各类网卡的创建销毁，vxlan的分配，vrf的分配等
+更新网卡时，ipnet会读取annotation中kv，判断网卡类型。若类型为memif，则会向deviceManager获取当前pod里各容器的memifInfo，之后根据memifInfo里的socket地址和secret，创建memif类型的网卡事务，并 push 至kvscheduler</description></item></channel></rss>

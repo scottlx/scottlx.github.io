@@ -1,189 +1,39 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Ebpf on windseek</title><link>https://scottlx.github.io/tags/ebpf/</link><description>Recent content in Ebpf on windseek</description><generator>Hugo</generator><language>zh-CN</language><lastBuildDate>Thu, 06 Mar 2025 15:49:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/ebpf/index.xml" rel="self" type="application/rss+xml"/><item><title>bpf lpm trie</title><link>https://scottlx.github.io/posts/bpf_lpm_trie/</link><pubDate>Thu, 06 Mar 2025 15:49:00 +0800</pubDate><guid>https://scottlx.github.io/posts/bpf_lpm_trie/</guid><description>&lt;p>lpm有多种实现方式，最常用的是用trie。当然也会有更简单的实现方式，例如某些特定场景用多重哈希表就能解决（ipv4地址，32个掩码对应32个哈希表）&lt;/p>
-&lt;p>从4.11内核版本开始，bpf map引入了&lt;code>BPF_MAP_TYPE_LPM_TRIE&lt;/code>&lt;/p>
-&lt;p>主要是用于匹配ip地址，内部是将数据存储在一个不平衡的trie中，key使用&lt;code>prefixlen,data&lt;/code>&lt;/p>
-&lt;p>data是以大端网络序存储的，data[0]存的是msb。&lt;/p>
-&lt;p>prefixlen支持8的整数倍，最高可以是2048。因此除了ip匹配，还可以用来做端口，协议，vpcid等等的扩充匹配。在应用层面上除了做路由表，还可以作为acl，policy等匹配过滤的底层实现&lt;/p>
-&lt;h4 id="使用方式">使用方式&lt;/h4>
-&lt;p>
-&lt;a href="https://docs.kernel.org/next/bpf/map_lpm_trie.html" target="_blank" rel="noopener">BPF_MAP_TYPE_LPM_TRIE — The Linux Kernel documentation&lt;/a>&lt;/p>
-&lt;p>除了上述基本的Ipv4的使用方式，扩展使用方式可以参考一下cillium中IPCACHE_MAP的使用&lt;/p>
-&lt;p>首先是map的定义&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">struct&lt;/span> ipcache_key {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">struct&lt;/span> bpf_lpm_trie_key lpm_key;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	__u16 cluster_id;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	__u8 pad1;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	__u8 family;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">union&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">struct&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			__u32		ip4;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			__u32		pad4;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			__u32		pad5;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>			__u32		pad6;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		};
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">union&lt;/span> v6addr	ip6;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	};
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>} __packed;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">/* Global IP -&amp;gt; Identity map for applying egress label-based policy */&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">struct&lt;/span> {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__uint&lt;/span>(type, BPF_MAP_TYPE_LPM_TRIE);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__type&lt;/span>(key, &lt;span style="color:#719e07">struct&lt;/span> ipcache_key);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__type&lt;/span>(value, &lt;span style="color:#719e07">struct&lt;/span> remote_endpoint_info);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__uint&lt;/span>(pinning, LIBBPF_PIN_BY_NAME);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__uint&lt;/span>(max_entries, IPCACHE_MAP_SIZE);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#268bd2">__uint&lt;/span>(map_flags, BPF_F_NO_PREALLOC);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>} IPCACHE_MAP __section_maps_btf;
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>可以看到cillium将v4和v6合并成一个map查询，匹配条件并带上了&lt;code>cluster_id&lt;/code>&lt;/p></description></item><item><title>cilium datapath</title><link>https://scottlx.github.io/posts/cilium-datapath/</link><pubDate>Mon, 03 Mar 2025 18:15:00 +0800</pubDate><guid>https://scottlx.github.io/posts/cilium-datapath/</guid><description>&lt;h3 id="hook点">hook点&lt;/h3>
-&lt;p>大部分是挂载位置是tc，tc是网络协议栈初始处理挂载点&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">// linux source code: dev.c
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span>__netif_receive_skb_core
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">|&lt;/span> &lt;span style="color:#268bd2">list_for_each_entry_rcu&lt;/span>(ptype, &lt;span style="color:#719e07">&amp;amp;&lt;/span>ptype_all, list) {...} &lt;span style="color:#586e75">// packet capture
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">|&lt;/span> do_xdp_generic &lt;span style="color:#586e75">// handle generic xdp
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">|&lt;/span> sch_handle_ingress &lt;span style="color:#586e75">// tc ingress
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span> &lt;span style="color:#719e07">|&lt;/span> tcf_classify
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#719e07">|&lt;/span> __tcf_classify &lt;span style="color:#586e75">// ebpf program is working here
-&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>如果没有下发policy，xdp就不会挂载各类filter程序&lt;/p>
-&lt;p>&lt;img src="https://rexrock.github.io/post-images/1614297388691.png" alt="cilium datapath">&lt;/p>
-&lt;h3 id="网络设备">网络设备&lt;/h3>
-&lt;p>cillium的网络方案不像常规的网桥模式（ovs，linux bridge），datapath不是一个完整的run to completion，而是分散在各个虚拟接口上，类似pipeline模式&lt;/p>
-&lt;p>cillium_host: 集群内所有podCIDR的网关，地址对容器可见&lt;/p>
-&lt;p>cilium_net: cilium_host的veth对，ipvlan模式才会用到？&lt;/p>
-&lt;p>clilium_vxlan: 用来提供Pod跨节点通信overlay封装&lt;/p>
-&lt;p>lxcXXXX: 容器veth对在主机侧的接口&lt;/p>
-&lt;h3 id="同节点pod2pod">同节点pod2pod&lt;/h3>
-&lt;p>cillium_host是所有pod的网关，因此会先arp request该地址。arp相应其实是在lxc处被代答了，arp报文不会走到cillium_host&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">// bpf_lxc.c
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">&lt;/span>__section_entry
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#dc322f">int&lt;/span> &lt;span style="color:#268bd2">cil_from_container&lt;/span>(&lt;span style="color:#719e07">struct&lt;/span> __ctx_buff &lt;span style="color:#719e07">*&lt;/span>ctx)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>{
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	...
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">case&lt;/span> &lt;span style="color:#268bd2">bpf_htons&lt;/span>(ETH_P_ARP)&lt;span style="color:#719e07">:&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		ret &lt;span style="color:#719e07">=&lt;/span> &lt;span style="color:#268bd2">tail_call_internal&lt;/span>(ctx, CILIUM_CALL_ARP, &lt;span style="color:#719e07">&amp;amp;&lt;/span>ext_err);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">break&lt;/span>;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	...
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#268bd2">__section_tail&lt;/span>(CILIUM_MAP_CALLS, CILIUM_CALL_ARP)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#dc322f">int&lt;/span> &lt;span style="color:#268bd2">tail_handle_arp&lt;/span>(&lt;span style="color:#719e07">struct&lt;/span> __ctx_buff &lt;span style="color:#719e07">*&lt;/span>ctx)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>{
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">union&lt;/span> macaddr mac &lt;span style="color:#719e07">=&lt;/span> THIS_INTERFACE_MAC;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">union&lt;/span> macaddr smac;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	__be32 sip;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	__be32 tip;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">/* Pass any unknown ARP requests to the Linux stack */&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">if&lt;/span> (&lt;span style="color:#719e07">!&lt;/span>&lt;span style="color:#268bd2">arp_validate&lt;/span>(ctx, &lt;span style="color:#719e07">&amp;amp;&lt;/span>mac, &lt;span style="color:#719e07">&amp;amp;&lt;/span>smac, &lt;span style="color:#719e07">&amp;amp;&lt;/span>sip, &lt;span style="color:#719e07">&amp;amp;&lt;/span>tip))
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">return&lt;/span> CTX_ACT_OK;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#586e75">/*
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * The endpoint is expected to make ARP requests for its gateway IP.
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * Most of the time, the gateway IP configured on the endpoint is
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * IPV4_GATEWAY but it may not be the case if after cilium agent reload
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * a different gateway is chosen. In such a case, existing endpoints
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * will have an old gateway configured. Since we don&amp;#39;t know the IP of
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * previous gateways, we answer requests for all IPs with the exception
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * of the LXC IP (to avoid specific problems, like IP duplicate address
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 * detection checks that might run within the container).
-&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#586e75">	 */&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">if&lt;/span> (tip &lt;span style="color:#719e07">==&lt;/span> LXC_IPV4)
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>		&lt;span style="color:#719e07">return&lt;/span> CTX_ACT_OK;
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>	&lt;span style="color:#719e07">return&lt;/span> &lt;span style="color:#268bd2">arp_respond&lt;/span>(ctx, &lt;span style="color:#719e07">&amp;amp;&lt;/span>mac, tip, &lt;span style="color:#719e07">&amp;amp;&lt;/span>smac, sip, &lt;span style="color:#2aa198">0&lt;/span>);
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>普通ipv4报文，走handle_ipv4_from_lxc&lt;/p></description></item><item><title>gobpf不完整使用指南</title><link>https://scottlx.github.io/posts/gobpf/</link><pubDate>Mon, 03 Oct 2022 14:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/gobpf/</guid><description>&lt;h3 id="编译过程">编译过程&lt;/h3>
-&lt;h4 id="安装llvm-10clang-10">安装llvm-10,clang-10&lt;/h4>
-&lt;p>apt-install llvm-10 clang-10&lt;/p>
-&lt;h4 id="下载bpf2go">下载bpf2go&lt;/h4>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-shell" data-lang="shell">&lt;span style="display:flex;">&lt;span>go install github.com/cilium/ebpf/cmd/bpf2go@latest
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>修改bpf程序的include&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">#include&lt;/span> &lt;span style="color:#719e07">&amp;#34;common.h&amp;#34;&lt;/span>&lt;span style="color:#719e07">
-&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h4 id="编译时将bpd的headers包含进来">编译时将bpd的headers包含进来&lt;/h4>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-shell" data-lang="shell">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#268bd2">GOPACKAGE&lt;/span>&lt;span style="color:#719e07">=&lt;/span>main bpf2go -cc clang-10 -cflags &lt;span style="color:#2aa198">&amp;#39;-O2 -g -Wall -Werror&amp;#39;&lt;/span> -target bpfel,bpfeb bpf helloworld.bpf.c -- -I /root/ebpf/examples/headers
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>得到大端和小端两个版本的ELF文件，之后在go程序里加载即可。cpu一般都是小端。&lt;/p>
-&lt;h3 id="内核版本要求">内核版本要求&lt;/h3>
-&lt;p>经测试一些gobpf的一些syscall不适配较低版本的内核（例如5.8的BPF_LINK_CREATE会报参数错误），建议使用最新版本内核5.19&lt;/p>
-&lt;h3 id="bpf_map">bpf_map&lt;/h3>
-&lt;p>用户态程序首先加载bpf maps，再将bpf maps绑定到fd上。elf文件中的realocation table用来将代码中的bpf maps重定向至正确的fd上,用户程序在fd上发起bpf syscall&lt;/p>
-&lt;p>map的value尽量不要存复合数据结构，若bpf程序和用户态程序共用一个头文件，用户态程序调用bpf.Lookup时由于结构体变量unexported而反射失败&lt;/p>
-&lt;h3 id="pinning-object">pinning object&lt;/h3>
-&lt;p>将map挂载到/sys/fs/bpf&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-go" data-lang="go">&lt;span style="display:flex;">&lt;span>ebpf.CollectionOptions{
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> Maps: ebpf.MapOptions{
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// Pin the map to the BPF filesystem and configure the&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// library to automatically re-write it in the BPF&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// program so it can be re-used if it already exists or&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#586e75">// create it if not&lt;/span>
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> PinPath: pinPath
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>其他用户态程序获取pinned map的fd&lt;/p></description></item><item><title>初识ebpf</title><link>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86ebpf/</link><pubDate>Mon, 03 Oct 2022 14:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86ebpf/</guid><description>&lt;p>摘自&lt;/p>
-&lt;p>
-&lt;a href="https://forsworns.github.io/zh/blogs/20210329/" target="_blank" rel="noopener">eBPF 用户空间虚拟机实现相关 | Blog (forsworns.github.io)&lt;/a>&lt;/p>
-&lt;p>[
-&lt;a href="http://arthurchiao.art/blog/cilium-bpf-xdp-reference-guide-zh/" target="_blank" rel="noopener">译] Cilium：BPF 和 XDP 参考指南（2021） (arthurchiao.art)&lt;/a>&lt;/p>
-&lt;h3 id="hook-point">hook point&lt;/h3>
-&lt;p>可以插入bpf代码的位置&lt;/p>
-&lt;div class="highlight">&lt;pre tabindex="0" style="color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-c" data-lang="c">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#719e07">enum&lt;/span> bpf_prog_type {
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_UNSPEC,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_SOCKET_FILTER,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_KPROBE,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_SCHED_CLS,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_SCHED_ACT,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_TRACEPOINT,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_XDP,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_PERF_EVENT,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_CGROUP_SKB,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_CGROUP_SOCK,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_LWT_IN,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_LWT_OUT,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_LWT_XMIT,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_SOCK_OPS,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> BPF_PROG_TYPE_SK_SKB,
-&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>};
-&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h3 id="程序类型">程序类型&lt;/h3>
-&lt;table>
- &lt;thead>
- &lt;tr>
- &lt;th>&lt;strong>bpf_prog_type&lt;/strong>&lt;/th>
- &lt;th>&lt;strong>BPF prog&lt;/strong> 入口参数（R1)&lt;/th>
- &lt;th>&lt;strong>程序类型&lt;/strong>&lt;/th>
- &lt;/tr>
- &lt;/thead>
- &lt;tbody>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_SOCKET_FILTER&lt;/strong>&lt;/td>
- &lt;td>&lt;strong>struct __sk_buff&lt;/strong>&lt;/td>
- &lt;td>用于过滤进出口网络报文，功能上和 cBPF 类似。&lt;/td>
- &lt;/tr>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_KPROBE&lt;/strong>&lt;/td>
- &lt;td>&lt;strong>struct&lt;/strong> &lt;strong>pt_regs&lt;/strong>&lt;/td>
- &lt;td>用于 kprobe 功能的 BPF 代码。&lt;/td>
- &lt;/tr>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_TRACEPOINT&lt;/strong>&lt;/td>
- &lt;td>这类 BPF 的参数比较特殊，根据 tracepoint 位置的不同而不同。&lt;/td>
- &lt;td>用于在各个 tracepoint 节点运行。&lt;/td>
- &lt;/tr>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_XDP&lt;/strong>&lt;/td>
- &lt;td>&lt;strong>struct&lt;/strong> &lt;strong>xdp_md&lt;/strong>&lt;/td>
- &lt;td>用于控制 XDP(eXtreme Data Path)的 BPF 代码。&lt;/td>
- &lt;/tr>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_PERF_EVENT&lt;/strong>&lt;/td>
- &lt;td>&lt;strong>struct bpf_perf_event_data&lt;/strong>&lt;/td>
- &lt;td>用于定义 perf event 发生时回调的 BPF 代码。&lt;/td>
- &lt;/tr>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_CGROUP_SKB&lt;/strong>&lt;/td>
- &lt;td>&lt;strong>struct __sk_buff&lt;/strong>&lt;/td>
- &lt;td>用于在 network cgroup 中运行的 BPF 代码。功能上和 Socket_Filter 近似。具体用法可以参考范例 test_cgrp2_attach。&lt;/td>
- &lt;/tr>
- &lt;tr>
- &lt;td>&lt;strong>BPF_PROG_TYPE_CGROUP_SOCK&lt;/strong>&lt;/td>
- &lt;td>&lt;strong>struct bpf_sock&lt;/strong>&lt;/td>
- &lt;td>另一个用于在 network cgroup 中运行的 BPF 代码，范例 test_cgrp2_sock2 中就展示了一个利用 BPF 来控制 host 和 netns 间通信的例子。&lt;/td>
- &lt;/tr>
- &lt;/tbody>
-&lt;/table>
-&lt;p>BPF 程序类型就是由 BPF side 的代码的函数参数确定的，比如写了一个函数，参数是 &lt;code>struct __sk_buff&lt;/code> 类型的，它就是一个 &lt;strong>BPF_PROG_TYPE_SOCKET_FILTER&lt;/strong> 类型的 BPF 程序&lt;/p></description></item></channel></rss>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>ebpf on windseek</title><link>https://scottlx.github.io/tags/ebpf/</link><description>Recent content in ebpf on windseek</description><generator>Hugo -- gohugo.io</generator><language>zh-CN</language><lastBuildDate>Mon, 26 May 2025 17:53:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/ebpf/index.xml" rel="self" type="application/rss+xml"/><item><title>深入剖析cilium monitor机制</title><link>https://scottlx.github.io/posts/%E6%B7%B1%E5%85%A5%E5%89%96%E6%9E%90cilium-monitor%E6%9C%BA%E5%88%B6/</link><pubDate>Mon, 26 May 2025 17:53:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E6%B7%B1%E5%85%A5%E5%89%96%E6%9E%90cilium-monitor%E6%9C%BA%E5%88%B6/</guid><description>可调试性 报文转发面组件中，可调试性十分关键。开发阶段可能可以使用gdb（ebpf甚至不能用gdb，只能用trace_printk），log等方式进行调试，但到了生产环境，以下几个功能是必须要完备的：
+抓包手段
+按照网卡抓包 按照流进行抓包 按照特定过滤条件抓包，例如源目的地址，端口，协议号等 报文计数
+收发包计数：rx，tx阶段计数 丢包计数：按照错误码进行区分 特定观测点计数：一些重要转发函数，例如l3_fwd, arp_response等 流日志
+流量方向：egress/ingress session信息：五元组，nat信息，tcp状态等 其他必要的上下文：例如转发表项查找的结果，构造的action，硬件卸载标记等 linux perf_events ebpf perf基于linux perf_event子系统。epbf通知用户态拷贝数据时基于perf_events的
+perf buffer ebpf中提供了内核和用户空间之间高效地交换数据的机制：perf buffer。它是一种per-cpu的环形缓冲区，当我们需要将ebpf收集到的数据发送到用户空间记录或者处理时，就可以用perf buffer来完成。它还有如下特点：
+能够记录可变长度数据记； 能够通过内存映射的方式在用户态读取读取数据，而无需通过系统调用陷入到内核去拷贝数据； 实现epoll通知机制 因此在cilium中，实现上述调试手段的思路，就是在转发面代码中构造相应的event到EVENTS_MAP，之后通过别的工具去读取并解析EVENTS_MAP中的数据
+EVENTS_MAP定义如下: bpf/lib/events.h
+struct { __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY); __uint(key_size, sizeof(__u32)); __uint(value_size, sizeof(__u32)); __uint(pinning, LIBBPF_PIN_BY_NAME); __uint(max_entries, __NR_CPUS__); } EVENTS_MAP __section_maps_btf; key是cpu的编号，因此大小是u32；value一般是文件描述符fd，关联一个perf event，因此也是u32
+数据面代码构造好data之后，使用helper function: bpf_perf_event_output通知用户态代码拷贝数据
+下面是cilium代码中封装好的event输出函数，最终就是调用的bpf_perf_event_output
+// bpf/include/bpf/ctx/skb.h #define ctx_event_output skb_event_output // bpf/include/bpf/helpers_skb.h /* Events for user space */ static int BPF_FUNC_REMAP(skb_event_output, struct __sk_buff *skb, void *map, __u64 index, const void *data, __u32 size) = (void *)BPF_FUNC_perf_event_output; //对应的func id 是 25 // /usr/include/linux/bpf.</description></item><item><title>bpf lpm trie</title><link>https://scottlx.github.io/posts/bpf_lpm_trie/</link><pubDate>Thu, 06 Mar 2025 15:49:00 +0800</pubDate><guid>https://scottlx.github.io/posts/bpf_lpm_trie/</guid><description>lpm有多种实现方式，最常用的是用trie。当然也会有更简单的实现方式，例如某些特定场景用多重哈希表就能解决（ipv4地址，32个掩码对应32个哈希表）
+从4.11内核版本开始，bpf map引入了BPF_MAP_TYPE_LPM_TRIE
+主要是用于匹配ip地址，内部是将数据存储在一个不平衡的trie中，key使用prefixlen,data
+data是以大端网络序存储的，data[0]存的是msb。
+prefixlen支持8的整数倍，最高可以是2048。因此除了ip匹配，还可以用来做端口，协议，vpcid等等的扩充匹配。在应用层面上除了做路由表，还可以作为acl，policy等匹配过滤的底层实现
+使用方式 BPF_MAP_TYPE_LPM_TRIE — The Linux Kernel documentation
+除了上述基本的Ipv4的使用方式，扩展使用方式可以参考一下cillium中IPCACHE_MAP的使用
+首先是map的定义
+struct ipcache_key { struct bpf_lpm_trie_key lpm_key; __u16 cluster_id; __u8 pad1; __u8 family; union { struct { __u32 ip4; __u32 pad4; __u32 pad5; __u32 pad6; }; union v6addr ip6; }; } __packed; /* Global IP -&amp;gt; Identity map for applying egress label-based policy */ struct { __uint(type, BPF_MAP_TYPE_LPM_TRIE); __type(key, struct ipcache_key); __type(value, struct remote_endpoint_info); __uint(pinning, LIBBPF_PIN_BY_NAME); __uint(max_entries, IPCACHE_MAP_SIZE); __uint(map_flags, BPF_F_NO_PREALLOC); } IPCACHE_MAP __section_maps_btf; 可以看到cillium将v4和v6合并成一个map查询，匹配条件并带上了cluster_id</description></item><item><title>cilium datapath</title><link>https://scottlx.github.io/posts/cilium-datapath/</link><pubDate>Mon, 03 Mar 2025 18:15:00 +0800</pubDate><guid>https://scottlx.github.io/posts/cilium-datapath/</guid><description>hook点 大部分是挂载位置是tc，tc是网络协议栈初始处理挂载点
+// linux source code: dev.c __netif_receive_skb_core | list_for_each_entry_rcu(ptype, &amp;amp;ptype_all, list) {...} // packet capture | do_xdp_generic // handle generic xdp | sch_handle_ingress // tc ingress | tcf_classify | __tcf_classify // ebpf program is working here 如果没有下发policy，xdp就不会挂载各类filter程序
+网络设备 cillium的网络方案不像常规的网桥模式（ovs，linux bridge），datapath不是一个完整的run to completion，而是分散在各个虚拟接口上，类似pipeline模式
+cillium_host: 集群内所有podCIDR的网关，地址对容器可见
+cilium_net: cilium_host的veth对，ipvlan模式才会用到？
+clilium_vxlan: 用来提供Pod跨节点通信overlay封装
+lxcXXXX: 容器veth对在主机侧的接口
+同节点pod2pod cillium_host是所有pod的网关，因此会先arp request该地址。arp相应其实是在lxc处被代答了，arp报文不会走到cillium_host
+// bpf_lxc.c __section_entry int cil_from_container(struct __ctx_buff *ctx) { ... case bpf_htons(ETH_P_ARP): ret = tail_call_internal(ctx, CILIUM_CALL_ARP, &amp;amp;ext_err); break; .</description></item><item><title>gobpf不完整使用指南</title><link>https://scottlx.github.io/posts/gobpf/</link><pubDate>Mon, 03 Oct 2022 14:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/gobpf/</guid><description>编译过程 安装llvm-10,clang-10 apt-install llvm-10 clang-10
+下载bpf2go go install github.com/cilium/ebpf/cmd/bpf2go@latest 修改bpf程序的include
+#include &amp;#34;common.h&amp;#34; 编译时将bpd的headers包含进来 GOPACKAGE=main bpf2go -cc clang-10 -cflags &amp;#39;-O2 -g -Wall -Werror&amp;#39; -target bpfel,bpfeb bpf helloworld.bpf.c -- -I /root/ebpf/examples/headers 得到大端和小端两个版本的ELF文件，之后在go程序里加载即可。cpu一般都是小端。
+内核版本要求 经测试一些gobpf的一些syscall不适配较低版本的内核（例如5.8的BPF_LINK_CREATE会报参数错误），建议使用最新版本内核5.19
+bpf_map 用户态程序首先加载bpf maps，再将bpf maps绑定到fd上。elf文件中的realocation table用来将代码中的bpf maps重定向至正确的fd上,用户程序在fd上发起bpf syscall
+map的value尽量不要存复合数据结构，若bpf程序和用户态程序共用一个头文件，用户态程序调用bpf.Lookup时由于结构体变量unexported而反射失败
+pinning object 将map挂载到/sys/fs/bpf
+ebpf.CollectionOptions{ Maps: ebpf.MapOptions{ // Pin the map to the BPF filesystem and configure the // library to automatically re-write it in the BPF // program so it can be re-used if it already exists or // create it if not PinPath: pinPath 其他用户态程序获取pinned map的fd</description></item><item><title>初识ebpf</title><link>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86ebpf/</link><pubDate>Mon, 03 Oct 2022 14:00:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E5%88%9D%E8%AF%86ebpf/</guid><description>摘自
+eBPF 用户空间虚拟机实现相关 | Blog (forsworns.github.io)
+[ 译] Cilium：BPF 和 XDP 参考指南（2021） (arthurchiao.art)
+hook point 可以插入bpf代码的位置
+enum bpf_prog_type { BPF_PROG_TYPE_UNSPEC, BPF_PROG_TYPE_SOCKET_FILTER, BPF_PROG_TYPE_KPROBE, BPF_PROG_TYPE_SCHED_CLS, BPF_PROG_TYPE_SCHED_ACT, BPF_PROG_TYPE_TRACEPOINT, BPF_PROG_TYPE_XDP, BPF_PROG_TYPE_PERF_EVENT, BPF_PROG_TYPE_CGROUP_SKB, BPF_PROG_TYPE_CGROUP_SOCK, BPF_PROG_TYPE_LWT_IN, BPF_PROG_TYPE_LWT_OUT, BPF_PROG_TYPE_LWT_XMIT, BPF_PROG_TYPE_SOCK_OPS, BPF_PROG_TYPE_SK_SKB, }; 程序类型 bpf_prog_type BPF prog 入口参数（R1) 程序类型 BPF_PROG_TYPE_SOCKET_FILTER struct __sk_buff 用于过滤进出口网络报文，功能上和 cBPF 类似。 BPF_PROG_TYPE_KPROBE struct pt_regs 用于 kprobe 功能的 BPF 代码。 BPF_PROG_TYPE_TRACEPOINT 这类 BPF 的参数比较特殊，根据 tracepoint 位置的不同而不同。 用于在各个 tracepoint 节点运行。 BPF_PROG_TYPE_XDP struct xdp_md 用于控制 XDP(eXtreme Data Path)的 BPF 代码。 BPF_PROG_TYPE_PERF_EVENT struct bpf_perf_event_data 用于定义 perf event 发生时回调的 BPF 代码。 BPF_PROG_TYPE_CGROUP_SKB struct __sk_buff 用于在 network cgroup 中运行的 BPF 代码。功能上和 Socket_Filter 近似。具体用法可以参考范例 test_cgrp2_attach。 BPF_PROG_TYPE_CGROUP_SOCK struct bpf_sock 另一个用于在 network cgroup 中运行的 BPF 代码，范例 test_cgrp2_sock2 中就展示了一个利用 BPF 来控制 host 和 netns 间通信的例子。 BPF 程序类型就是由 BPF side 的代码的函数参数确定的，比如写了一个函数，参数是 struct __sk_buff 类型的，它就是一个 BPF_PROG_TYPE_SOCKET_FILTER 类型的 BPF 程序</description></item></channel></rss>
