@@ -106,7 +106,7 @@ typedef abf_itf_attach
 
 
 
-![image-kvscheduler](https://docs.ligato.io/en/latest/img/developer-guide/kvscheduler.svg)
+![image-kvscheduler](/img/vpp-agent/kvscheduler.svg)
 
 #### RM的实现
 
@@ -134,7 +134,7 @@ typedef abf_itf_attach
 
 ### 事务流程（创建bridge domain为例）
 
-![image-txn](https://docs.ligato.io/en/latest/img/control-flow-diagram/add_bd_before_interface.svg?sanitize=true)
+![image-txn](/img/vpp-agent/add_bd_before_interface.svg?sanitize=true)
 
 
 #### 初始化阶段
