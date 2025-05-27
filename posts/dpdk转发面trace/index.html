@@ -1,0 +1,1033 @@
+<!doctype html><html xmlns=http://www.w3.org/1999/xhtml xml:lang=en lang=en-us><head><meta charset=utf-8><meta name=viewport content="width=device-width,minimum-scale=1,maximum-scale=1"><link href=/css/fonts.css rel=stylesheet type=text/css><title>dpdk转发面trace</title><link rel=stylesheet href=/css/hugo-octopress.css><link rel=stylesheet href=/css/fork-awesome.min.css><link href=https://scottlx.github.io/favicon.png rel=icon><meta name=description content><meta name=keywords content><meta name=author content="windseek"><meta name=generator content="Hugo 0.119.0"></head><body><header role=banner><hgroup><h1><a href=https://scottlx.github.io/>windseek</a></h1><h2>be curious, be free</h2></hgroup></header><nav role=navigation><fieldset class=mobile-nav><select onchange="location=this.value"><option value>Navigate…</option><option value=https://scottlx.github.io/>» Blog</option><option value=https://scottlx.github.io/archives/>» Archives</option><option value=https://scottlx.github.io/cheatsheet/>» CheatSheet</option><option value=https://scottlx.github.io/about/>» Aboutme</option></select></fieldset><ul class=main-navigation><li><a href=https://scottlx.github.io/ title=Blog>Blog</a></li><li><a href=https://scottlx.github.io/archives/ title=Archives target=_blank rel="noopener noreferrer">Archives</a></li><li><a href=https://scottlx.github.io/cheatsheet/ title=CheatSheet target=_blank rel="noopener noreferrer">CheatSheet</a></li><li><a href=https://scottlx.github.io/about/ title=Aboutme target=_blank rel="noopener noreferrer">Aboutme</a></li></ul><ul class=subscription></ul><form action=https://www.google.com/search method=get target=_blank rel="noopener noreferrer"><fieldset role=search><input class=search type=text name=q results=0 placeholder=Search>
+<input type=hidden name=q value=site:https://scottlx.github.io/></fieldset></form></nav><div id=main><div id=content><div><article class=hentry role=article><header><p class=meta>May 27, 2025
+- 14 minute read
+- <a href=https://scottlx.github.io/posts/dpdk%E8%BD%AC%E5%8F%91%E9%9D%A2trace/#disqus_thread>Comments</a>
+- <a class=label href=https://scottlx.github.io/categories/%e6%8a%80%e6%9c%af%e4%bb%8b%e7%bb%8d/>技术介绍</a></p><h1 class=entry-title><a href=https://scottlx.github.io/posts/dpdk%E8%BD%AC%E5%8F%91%E9%9D%A2trace/>dpdk转发面trace</a></h1></header><div class=entry-content><nav id=TableOfContents><ul><li><ul><li><a href=#共享内存buffer>共享内存buffer</a></li><li><a href=#ring-buffer>ring buffer</a></li><li><a href=#data-in-memory-file>data in memory file</a></li><li><a href=#trace-record>trace record</a></li><li><a href=#trace语法>trace语法</a></li><li><a href=#trace_reader>trace_reader</a></li></ul></li></ul></nav><p>上一期分析了ebpf转发面通过linux perf event的思路进行trace，这一期介绍一种dpdk程序的trace方法。基本原理大致相通，也是通过共享内存的方式进行数据传输。转发面代码和工具代码通过mmap共享一段内存，转发面产生数据，工具代码消费数据。</p><p><img src=/img/blobs/ptrace%E5%8E%9F%E7%90%86.png alt=ptrace原理></p><h3 id=共享内存buffer>共享内存buffer</h3><p>由于大部分dpdk程序是run to completion模型，一个lcore对应一个网卡队列，报文尽可能不要在cpu之间来回切换，而是由单个cpu处理完所有逻辑之后发送。因此，相对应的，我们的buffer要为每一个cpu都分配一个ring</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#719e07>extern</span> <span style=color:#719e07>struct</span> trace_buffer <span style=color:#719e07>*</span>g_trace;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>typedef</span> <span style=color:#268bd2>OBJ_RING</span>(<span style=color:#719e07>struct</span> trace_record, <span style=color:#2aa198>1</span> <span style=color:#719e07>&lt;&lt;</span> <span style=color:#2aa198>11</span>) __rte_cache_aligned <span style=color:#dc322f>trace_ring_t</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>struct</span> trace_buffer {
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>trace_ring_t</span> percpu[<span style=color:#2aa198>16</span>];
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>int</span> enabled;
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>uint8_t</span> ports[MAX_PORT][NR_TRACE_ON];
+</span></span><span style=display:flex><span>};
+</span></span></code></pre></div><h3 id=ring-buffer>ring buffer</h3><p>常规做法是使用dpdk lib的rte_ring，但是该ring的实现比较复杂，且很多功能我们不会用到。因此下面介绍一个简易的ring实现，相比dpdk rte_ring，内存占用较少，逻辑简单。</p><p>核心思路</p><ul><li>使用内存屏障<code>rte_smp_wmb()/rte_smp_rmb()</code>替代锁，保证线程安全</li><li>使用prepare，commit两段式提交，确保数据一致性</li><li>使用mask位运算代替取模获取索引，提升查找效率</li></ul><p>具体实现代码如下</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#719e07>#define OBJ_RING(obj_type, ring_size) \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>	struct { \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		uint64_t next_seq; \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		obj_type buffer[IS_POWER_OF_2(ring_size) ? \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		    (int)((ring_size) + MEMBER_TYPE_ASSERT(obj_type, seq, uint64_t)) : -1]; \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>	}
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span>
+</span></span><span style=display:flex><span><span style=color:#719e07>#define obj_ring_type(ring)             typeof((ring)-&gt;buffer[0])
+</span></span></span><span style=display:flex><span><span style=color:#719e07>#define obj_ring_mask(ring)             (ARRAY_SIZE((ring)-&gt;buffer) - 1)
+</span></span></span><span style=display:flex><span><span style=color:#719e07>#define obj_ring_at(ring, seq)  (&amp;(ring)-&gt;buffer[(seq) &amp; obj_ring_mask(ring)])
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span>
+</span></span><span style=display:flex><span><span style=color:#719e07>#define obj_ring_init(ring) do { \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		obj_ring_type(ring) *_obj; \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		(ring)-&gt;next_seq = 0; \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		array_for_each(_obj, (ring)-&gt;buffer) \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		_obj-&gt;seq = 0; \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>} while (0)
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span>
+</span></span><span style=display:flex><span><span style=color:#719e07>#define obj_ring_write_prepare(ring) ({ \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		obj_ring_type(ring) *_obj = obj_ring_at((ring), (ring)-&gt;next_seq); \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		_obj-&gt;seq = (ring)-&gt;next_seq; \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		rte_smp_wmb(); \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		_obj; \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>	})
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span>
+</span></span><span style=display:flex><span><span style=color:#719e07>#define obj_ring_write_commit(ring) do { \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		rte_smp_wmb(); \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		(ring)-&gt;next_seq++; \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>} while (0)
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span>
+</span></span><span style=display:flex><span><span style=color:#719e07>#define obj_ring_next_seq(ring) ACCESS_ONCE((ring)-&gt;next_seq)
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span>
+</span></span><span style=display:flex><span><span style=color:#719e07>#define obj_ring_read(ring, nseq, res) ({ \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		uint64_t _seq = (nseq); \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		obj_ring_type(ring) *_res = NULL; \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		if (_seq &lt; obj_ring_next_seq(ring)) { \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>			obj_ring_type(ring) *_obj = obj_ring_at((ring), _seq); \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>			_res = (res); \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>			do { \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>				_seq = ACCESS_ONCE(_obj-&gt;seq); \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>				while (_seq &gt;= obj_ring_next_seq(ring)) {} \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>				rte_smp_rmb(); \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>				*_res = ACCESS_ONCE(*_obj); \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>				rte_smp_rmb(); \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>				_res-&gt;seq = ACCESS_ONCE(_obj-&gt;seq); \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>			} while (_seq != _res-&gt;seq); \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		} \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>		_res; \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>	})
+</span></span></span></code></pre></div><p>使用方式</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#586e75>//prepare
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#268bd2>obj_ring_write_prepare</span>(ring);
+</span></span><span style=display:flex><span>    _obj <span style=color:#719e07>=</span> <span style=color:#268bd2>obj_ring_at</span>(ring, next_seq); <span style=color:#586e75>// 获取写入位置
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>    _obj<span style=color:#719e07>-&gt;</span>seq <span style=color:#719e07>=</span> next_seq;              <span style=color:#586e75>// 设置有效标记
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>    <span style=color:#268bd2>rte_smp_wmb</span>();                     <span style=color:#586e75>// 写内存屏障保证可见性
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>
+</span></span><span style=display:flex><span><span style=color:#586e75>// 构造record
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>
+</span></span><span style=display:flex><span><span style=color:#586e75>//commit
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#268bd2>obj_ring_write_commit</span>(ring);
+</span></span><span style=display:flex><span>    <span style=color:#268bd2>rte_smp_wmb</span>();      <span style=color:#586e75>// 确保数据完全写入后执行
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>    next_seq<span style=color:#719e07>++</span>;         <span style=color:#586e75>// 递增序列号提交写入
+</span></span></span></code></pre></div><h3 id=data-in-memory-file>data in memory file</h3><p>转发面的表项mmap到文件，之后用工具读取文件并解析，是dpdk转发面开发中很常见的场景，比如路由表，邻居表的dump。</p><p>相较于用unix socket传输，直接读取内存文件不会有速率的限制，且实现起来比较简单。</p><p>另一个优点是表项文件可以保留在主机上，当进程发生异常重启时，初始化阶段可以通过内存文件restore所有表项。</p><p>但是trade off是要处理好并发读写的问题。</p><p>我们可以定义一种通用的header带在数据前面方便我们解析</p><ul><li>magic：魔术字，进行解析之前校验该特征</li><li>version: 版本，预留</li><li>data_size: data[]部分的长度</li><li>file_size：包含header的整个内存文件的大小，按page size取整</li><li>type: 定义文件时只读还是可写</li></ul><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#719e07>struct</span> dmf_header {
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>uint32_t</span> magic;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>uint32_t</span> version;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>uint64_t</span> data_size;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>uint64_t</span> file_size;     <span style=color:#586e75>/* PAGE_SIZE aligned */</span>
+</span></span><span style=display:flex><span>	u8       initialized;   <span style=color:#586e75>/* flag to indicate whether the file is initialized */</span>
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>char</span> name[DMF_SPC_HDR_NAME_LEN];
+</span></span><span style=display:flex><span>	u8       type;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>char</span> reserved[<span style=color:#2aa198>18</span>];
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>char</span> data[];
+</span></span><span style=display:flex><span>};
+</span></span></code></pre></div><p>创建dmf映射时，我们可以定义一种通用的spec</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#719e07>struct</span> dmf_spec {
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> pal_hlist_node   hnode;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>obj_id_t</span>                   id;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>char</span> name[DMF_SPC_HDR_NAME_LEN];
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>uint32_t</span> version;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>uint32_t</span> page_shift;  <span style=color:#586e75>/* 内存页大小 */</span>
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>int</span> reset_level;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>uint64_t</span> addr;    <span style=color:#586e75>/* 用户态代码中的虚拟内存地址 */</span>
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>size_t</span>   head_padding;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>size_t</span>   data_size;
+</span></span><span style=display:flex><span>};
+</span></span></code></pre></div><p>使用时指定好spec就可以进行内存文件映射</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#719e07>struct</span> dmf_spec dmf_specs[] <span style=color:#719e07>=</span> {
+</span></span><span style=display:flex><span>	{{<span style=color:#b58900>NULL</span>, <span style=color:#b58900>NULL</span>}, OBJ_ID_NULL, <span style=color:#2aa198>&#34;fp/trace&#34;</span>,         <span style=color:#2aa198>0x20200320</span>, DMF_PAGE_SHIFT, DMF_RL_DEL, <span style=color:#2aa198>0x6670ull</span> <span style=color:#719e07>&lt;&lt;</span> <span style=color:#2aa198>32</span>, <span style=color:#2aa198>0</span>,   <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>*</span>g_trace)},
+</span></span><span style=display:flex><span>};
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#dc322f>void</span> <span style=color:#268bd2>mvs_dp_dmf_map_all</span>(<span style=color:#dc322f>int</span> readonly)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	g_trace      <span style=color:#719e07>=</span> <span style=color:#268bd2>dmf_map</span>(<span style=color:#2aa198>&#34;fp/trace&#34;</span>, <span style=color:#2aa198>0</span>);
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p>dmf_map流程</p><ol><li>寻找文件路径，若文件存在，mmap整个文件到spec->addr</li><li>若文件不存在，创建文件再mmap</li><li>检查header的格式，若不合法，reset data</li></ol><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#dc322f>void</span> <span style=color:#719e07>*</span><span style=color:#268bd2>dmf_map_by_spec</span>(<span style=color:#719e07>struct</span> dmf_spec <span style=color:#719e07>*</span>spec, <span style=color:#719e07>const</span> <span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>name, <span style=color:#dc322f>int</span> readonly)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>char</span> path[PATH_MAX];
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>void</span> <span style=color:#719e07>*</span>data <span style=color:#719e07>=</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>dmf_file_path</span>(spec, path, <span style=color:#719e07>sizeof</span>(path));
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#268bd2>access</span>(path, W_OK <span style=color:#719e07>|</span> R_OK) <span style=color:#719e07>&lt;</span> <span style=color:#2aa198>0</span>) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (readonly) {
+</span></span><span style=display:flex><span>			<span style=color:#268bd2>PAL_ERROR</span>(<span style=color:#2aa198>&#34;dmf: file not exist: %s</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>, name);
+</span></span><span style=display:flex><span>			<span style=color:#719e07>goto</span> out;
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (<span style=color:#268bd2>dmf_create</span>(name) <span style=color:#719e07>&lt;</span> <span style=color:#2aa198>0</span>) {
+</span></span><span style=display:flex><span>			<span style=color:#719e07>goto</span> out;
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	data <span style=color:#719e07>=</span> <span style=color:#268bd2>dmf_map_file</span>(path, spec, readonly);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>out:
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> data;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#dc322f>int</span> <span style=color:#268bd2>dmf_create</span>(<span style=color:#719e07>const</span> <span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>name)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> dmf_spec <span style=color:#719e07>*</span>spec;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	spec <span style=color:#719e07>=</span> <span style=color:#268bd2>dmf_spec_find</span>(name);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>spec) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>PAL_ERROR</span>(<span style=color:#2aa198>&#34;dmf: no spec found for %s</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>, name);
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#719e07>-</span><span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> <span style=color:#268bd2>dmf_do_create</span>(spec);
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#dc322f>int</span> <span style=color:#268bd2>dmf_do_create</span>(<span style=color:#719e07>struct</span> dmf_spec <span style=color:#719e07>*</span>spec)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> dmf_header hdr;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>size_t</span> data_size;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>size_t</span> file_size;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>size_t</span> page_size;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>char</span> path[PATH_MAX];
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>int</span> ret <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	data_size <span style=color:#719e07>=</span> spec<span style=color:#719e07>-&gt;</span>data_size;
+</span></span><span style=display:flex><span>	page_size <span style=color:#719e07>=</span> <span style=color:#2aa198>1ull</span> <span style=color:#719e07>&lt;&lt;</span> spec<span style=color:#719e07>-&gt;</span>page_shift;
+</span></span><span style=display:flex><span>	file_size <span style=color:#719e07>=</span> <span style=color:#268bd2>ROUND_UP_TO_PAGE_SIZE</span>(<span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> dmf_header) <span style=color:#719e07>+</span> data_size <span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span>					  spec<span style=color:#719e07>-&gt;</span>head_padding, spec<span style=color:#719e07>-&gt;</span>page_shift);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>PAL_DEBUG</span>(<span style=color:#2aa198>&#34;spec data_size 0x%x, file_size = 0x%x&#34;</span>, data_size, file_size);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>dmf_file_path</span>(spec, path, <span style=color:#719e07>sizeof</span>(path));
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#268bd2>dmf_mkdir_p</span>(path) <span style=color:#719e07>&lt;</span> <span style=color:#2aa198>0</span>) {
+</span></span><span style=display:flex><span>        <span style=color:#719e07>return</span> <span style=color:#719e07>-</span><span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>dmf_hdr_reset_hard</span>(<span style=color:#719e07>&amp;</span>hdr, spec, file_size, DMF_FILE_TYPE_FIXD_STATIC);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#268bd2>DMF_IS_1G_HUGEPAGE</span>(spec) <span style=color:#719e07>||</span> <span style=color:#268bd2>DMF_IS_2M_HUGEPAGE</span>(spec)) {
+</span></span><span style=display:flex><span>		ret <span style=color:#719e07>=</span> <span style=color:#268bd2>dmf_create_hugetlbfs</span>(<span style=color:#719e07>&amp;</span>hdr, path, file_size, spec<span style=color:#719e07>-&gt;</span>head_padding);
+</span></span><span style=display:flex><span>	} <span style=color:#719e07>else</span> {
+</span></span><span style=display:flex><span>		ret <span style=color:#719e07>=</span> <span style=color:#268bd2>dmf_create_tmpfs</span>(<span style=color:#719e07>&amp;</span>hdr, path, file_size, page_size, spec<span style=color:#719e07>-&gt;</span>head_padding);
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (ret <span style=color:#719e07>&lt;</span> <span style=color:#2aa198>0</span>) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> ret;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>PAL_LOG</span>(<span style=color:#2aa198>&#34;dmf: created file %s, file_size=%zd, page_size=%zd</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>,
+</span></span><span style=display:flex><span>		path, file_size, page_size);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#dc322f>int</span> <span style=color:#268bd2>dmf_create_tmpfs</span>(<span style=color:#719e07>struct</span> dmf_header <span style=color:#719e07>*</span>hdr, <span style=color:#719e07>const</span> <span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>path,
+</span></span><span style=display:flex><span>		 <span style=color:#dc322f>size_t</span> file_size, <span style=color:#dc322f>size_t</span> page_size,
+</span></span><span style=display:flex><span>		 <span style=color:#dc322f>size_t</span> head_padding)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>data <span style=color:#719e07>=</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>int</span> fd <span style=color:#719e07>=</span> <span style=color:#719e07>-</span><span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>ASSERT</span>(head_padding <span style=color:#719e07>&lt;=</span> (page_size <span style=color:#719e07>-</span> <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>*</span>hdr)));
+</span></span><span style=display:flex><span>	data <span style=color:#719e07>=</span> <span style=color:#268bd2>malloc</span>(page_size);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>data) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>goto</span> err;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>memset</span>(data, <span style=color:#2aa198>0</span>, page_size);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	fd <span style=color:#719e07>=</span> <span style=color:#268bd2>open</span>(path, O_WRONLY <span style=color:#719e07>|</span> O_TRUNC <span style=color:#719e07>|</span> O_CREAT, <span style=color:#2aa198>0644</span>);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (fd <span style=color:#719e07>&lt;</span> <span style=color:#2aa198>0</span>) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>goto</span> err;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>while</span> (file_size) {
+</span></span><span style=display:flex><span>		<span style=color:#dc322f>size_t</span> bytes <span style=color:#719e07>=</span> <span style=color:#268bd2>dmf_min</span>(page_size, file_size);
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> ((<span style=color:#dc322f>size_t</span>)<span style=color:#268bd2>write</span>(fd, data, bytes) <span style=color:#719e07>!=</span> bytes) {
+</span></span><span style=display:flex><span>			<span style=color:#719e07>goto</span> err;
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>		file_size <span style=color:#719e07>-=</span> bytes;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#268bd2>lseek</span>(fd, head_padding, SEEK_SET) <span style=color:#719e07>==</span> <span style=color:#719e07>-</span><span style=color:#2aa198>1</span>) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>goto</span> err;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> ((<span style=color:#dc322f>size_t</span>)<span style=color:#268bd2>write</span>(fd, hdr, <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>*</span>hdr)) <span style=color:#719e07>!=</span> <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>*</span>hdr)) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>goto</span> err;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>close</span>(fd);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>free</span>(data);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>err:
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>PAL_ERROR</span>(<span style=color:#2aa198>&#34;dmf: failed to create file: %s: %s</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>,
+</span></span><span style=display:flex><span>		  path, <span style=color:#268bd2>strerror</span>(errno));
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (fd <span style=color:#719e07>&gt;=</span> <span style=color:#2aa198>0</span>) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>close</span>(fd);
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (data) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>free</span>(data);
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> <span style=color:#719e07>-</span><span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#dc322f>int</span> <span style=color:#268bd2>dmf_create_hugetlbfs</span>(<span style=color:#719e07>struct</span> dmf_header <span style=color:#719e07>*</span>hdr, <span style=color:#719e07>const</span> <span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>path,
+</span></span><span style=display:flex><span>		     <span style=color:#dc322f>size_t</span> file_size, <span style=color:#dc322f>size_t</span> head_padding)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>void</span> <span style=color:#719e07>*</span>addr;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>int</span> fd;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>ASSERT</span>(head_padding <span style=color:#719e07>&lt;</span> (file_size <span style=color:#719e07>-</span> <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>*</span>hdr)));
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	fd <span style=color:#719e07>=</span> <span style=color:#268bd2>open</span>(path, O_CREAT <span style=color:#719e07>|</span> O_RDWR, <span style=color:#2aa198>0600</span>);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (fd <span style=color:#719e07>&lt;</span> <span style=color:#2aa198>0</span>) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#719e07>-</span><span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#586e75>/* do ftruncate first to avoid mmap failed */</span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>ftruncate</span>(fd, file_size);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	addr <span style=color:#719e07>=</span> <span style=color:#268bd2>mmap</span>(<span style=color:#b58900>NULL</span>, file_size, PROT_READ <span style=color:#719e07>|</span> PROT_WRITE,
+</span></span><span style=display:flex><span>		    MAP_SHARED <span style=color:#719e07>|</span> MAP_POPULATE, fd, <span style=color:#2aa198>0</span>);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>close</span>(fd);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (addr <span style=color:#719e07>==</span> MAP_FAILED) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>PAL_ERROR</span>(<span style=color:#2aa198>&#34;dmf: failed to create file: %s: %s</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>,
+</span></span><span style=display:flex><span>			  path, <span style=color:#268bd2>strerror</span>(errno));
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#719e07>-</span><span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>memcpy</span>((<span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>)addr <span style=color:#719e07>+</span> head_padding, hdr, <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>*</span>hdr));
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>munmap</span>(addr, file_size);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#dc322f>void</span> <span style=color:#719e07>*</span> <span style=color:#268bd2>dmf_map_file</span>(<span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>path, <span style=color:#719e07>struct</span> dmf_spec <span style=color:#719e07>*</span>spec, <span style=color:#dc322f>int</span> readonly)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>size_t</span> file_size;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> dmf_header <span style=color:#719e07>*</span>hdr;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>BUILD_BUG_ON</span>(<span style=color:#719e07>sizeof</span>(<span style=color:#719e07>*</span>hdr) <span style=color:#719e07>!=</span> <span style=color:#2aa198>128</span>);
+</span></span><span style=display:flex><span>	hdr <span style=color:#719e07>=</span> <span style=color:#268bd2>dmf_do_map</span>(path, spec, <span style=color:#719e07>&amp;</span>file_size, readonly);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>hdr) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>PAL_ERROR</span>(<span style=color:#2aa198>&#34;dmf: failed to map %s: %s</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>, spec<span style=color:#719e07>-&gt;</span>name, <span style=color:#268bd2>strerror</span>(errno));
+</span></span><span style=display:flex><span>		<span style=color:#719e07>goto</span> err;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (file_size <span style=color:#719e07>&lt;</span> spec<span style=color:#719e07>-&gt;</span>data_size) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>PAL_ERROR</span>(<span style=color:#2aa198>&#34;dmf: file_size %zd &lt; data_size %zd</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>,
+</span></span><span style=display:flex><span>			  file_size, spec<span style=color:#719e07>-&gt;</span>data_size);
+</span></span><span style=display:flex><span>		<span style=color:#719e07>goto</span> err;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#268bd2>dmf_need_reset</span>(hdr, spec)) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (readonly) {
+</span></span><span style=display:flex><span>			<span style=color:#719e07>goto</span> err;
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>		hdr<span style=color:#719e07>-&gt;</span>data_size <span style=color:#719e07>=</span> spec<span style=color:#719e07>-&gt;</span>data_size;
+</span></span><span style=display:flex><span>		hdr<span style=color:#719e07>-&gt;</span>file_size <span style=color:#719e07>=</span> file_size;
+</span></span><span style=display:flex><span>		hdr<span style=color:#719e07>-&gt;</span>version   <span style=color:#719e07>=</span> spec<span style=color:#719e07>-&gt;</span>version;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> hdr<span style=color:#719e07>-&gt;</span>data;
+</span></span><span style=display:flex><span>err:
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#268bd2>inline</span> <span style=color:#dc322f>void</span> <span style=color:#719e07>*</span> <span style=color:#268bd2>dmf_do_map</span>(<span style=color:#719e07>const</span> <span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>path, <span style=color:#719e07>struct</span> dmf_spec <span style=color:#719e07>*</span>spec,
+</span></span><span style=display:flex><span>	   <span style=color:#dc322f>size_t</span> <span style=color:#719e07>*</span>file_size, <span style=color:#dc322f>int</span> readonly)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>uint8_t</span> <span style=color:#719e07>*</span>ptr;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> stat st;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>int</span> fd <span style=color:#719e07>=</span> <span style=color:#719e07>-</span><span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	fd <span style=color:#719e07>=</span> <span style=color:#268bd2>open</span>(path, O_RDWR, <span style=color:#2aa198>0644</span>);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (fd <span style=color:#719e07>&lt;</span> <span style=color:#2aa198>0</span>) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>PAL_ERROR</span>(<span style=color:#2aa198>&#34;dmf: failed to open file %s: %s</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>, path, <span style=color:#268bd2>strerror</span>(errno));
+</span></span><span style=display:flex><span>		<span style=color:#719e07>goto</span> err;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#268bd2>fstat</span>(fd, <span style=color:#719e07>&amp;</span>st) <span style=color:#719e07>!=</span> <span style=color:#2aa198>0</span>) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>PAL_ERROR</span>(<span style=color:#2aa198>&#34;dmf: fstat failed: %s: %s</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>, path, <span style=color:#268bd2>strerror</span>(errno));
+</span></span><span style=display:flex><span>		<span style=color:#719e07>goto</span> err;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#586e75>/* map the whole file, even we may use part of them; ct is one example. */</span>
+</span></span><span style=display:flex><span>	ptr <span style=color:#719e07>=</span> <span style=color:#268bd2>mmap</span>((<span style=color:#dc322f>void</span> <span style=color:#719e07>*</span>)(<span style=color:#dc322f>uintptr_t</span>)spec<span style=color:#719e07>-&gt;</span>addr, st.st_size,
+</span></span><span style=display:flex><span>		   readonly <span style=color:#719e07>?</span> PROT_READ : PROT_READ <span style=color:#719e07>|</span> PROT_WRITE,
+</span></span><span style=display:flex><span>		   MAP_SHARED <span style=color:#719e07>|</span> MAP_POPULATE, fd, <span style=color:#2aa198>0</span>);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (ptr <span style=color:#719e07>==</span> MAP_FAILED) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>PAL_ERROR</span>(<span style=color:#2aa198>&#34;dmf: failed to map file %s: %s</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>, path, <span style=color:#268bd2>strerror</span>(errno));
+</span></span><span style=display:flex><span>		<span style=color:#719e07>goto</span> err;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (spec<span style=color:#719e07>-&gt;</span>addr <span style=color:#719e07>&amp;&amp;</span> (<span style=color:#dc322f>uintptr_t</span>)ptr <span style=color:#719e07>!=</span> spec<span style=color:#719e07>-&gt;</span>addr) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>PAL_ERROR</span>(<span style=color:#2aa198>&#34;dmf: requested map addr 0x%lx, but mapped at 0x%lx</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>,
+</span></span><span style=display:flex><span>			  spec<span style=color:#719e07>-&gt;</span>addr, (<span style=color:#dc322f>intptr_t</span>)ptr);
+</span></span><span style=display:flex><span>		<span style=color:#719e07>goto</span> err;
+</span></span><span style=display:flex><span>	} <span style=color:#719e07>else</span> {
+</span></span><span style=display:flex><span>		spec<span style=color:#719e07>-&gt;</span>addr <span style=color:#719e07>=</span> (<span style=color:#dc322f>uintptr_t</span>)ptr;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>*</span>file_size <span style=color:#719e07>=</span> st.st_size;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>close</span>(fd);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> ptr <span style=color:#719e07>+</span> spec<span style=color:#719e07>-&gt;</span>head_padding;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>err:
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (fd <span style=color:#719e07>&gt;=</span> <span style=color:#2aa198>0</span>) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>close</span>(fd);
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#268bd2>inline</span> <span style=color:#dc322f>int</span> <span style=color:#268bd2>dmf_need_reset</span>(<span style=color:#719e07>struct</span> dmf_header <span style=color:#719e07>*</span>hdr, <span style=color:#719e07>struct</span> dmf_spec <span style=color:#719e07>*</span>spec)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#719e07>const</span> <span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>name <span style=color:#719e07>=</span> spec<span style=color:#719e07>-&gt;</span>name;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (hdr<span style=color:#719e07>-&gt;</span>magic <span style=color:#719e07>!=</span> DMF_MAGIC) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>PAL_WARNING</span>(<span style=color:#2aa198>&#34;dmf: %s: magic mismatch: hdr magic 0x%08x != 0x%08x</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>,
+</span></span><span style=display:flex><span>			    name, hdr<span style=color:#719e07>-&gt;</span>magic, DMF_MAGIC);
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (hdr<span style=color:#719e07>-&gt;</span>data_size <span style=color:#719e07>!=</span> spec<span style=color:#719e07>-&gt;</span>data_size) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>PAL_WARNING</span>(<span style=color:#2aa198>&#34;dmf: %s: data_size mismatch: hdr data_size %zd != %zd</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>,
+</span></span><span style=display:flex><span>			    name, hdr<span style=color:#719e07>-&gt;</span>data_size, spec<span style=color:#719e07>-&gt;</span>data_size);
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#586e75>/* &#39;\0&#39; is included */</span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#268bd2>memcmp</span>(hdr<span style=color:#719e07>-&gt;</span>name, name, <span style=color:#268bd2>dmf_min</span>(<span style=color:#268bd2>strlen</span>(name) <span style=color:#719e07>+</span> <span style=color:#2aa198>1</span>, <span style=color:#719e07>sizeof</span>(hdr<span style=color:#719e07>-&gt;</span>name))) <span style=color:#719e07>!=</span> <span style=color:#2aa198>0</span>) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>PAL_WARNING</span>(<span style=color:#2aa198>&#34;dmf: %s: name mismatch: hdr name %s</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>,
+</span></span><span style=display:flex><span>			    name, hdr<span style=color:#719e07>-&gt;</span>name);
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (hdr<span style=color:#719e07>-&gt;</span>version <span style=color:#719e07>!=</span> spec<span style=color:#719e07>-&gt;</span>version) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>PAL_WARNING</span>(<span style=color:#2aa198>&#34;dmf: %s version mismatch: hdr version 0x%08x != 0x%08x</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>,
+</span></span><span style=display:flex><span>			    name, hdr<span style=color:#719e07>-&gt;</span>version, spec<span style=color:#719e07>-&gt;</span>version);
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><h3 id=trace-record>trace record</h3><p>一条trace_record需要记录了一条流的完整信， 包括rx和tx时的skb信息，cpu id，经过的所有trace points以及必要的info</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#586e75>/* trace的skb只记录必要的header信息*/</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>struct</span> trace_skb {
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>char</span> data[<span style=color:#2aa198>192</span>];
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>uint32_t</span> pkt_len: <span style=color:#2aa198>31</span>;
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>uint32_t</span> has_eth_hdr: <span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>uint16_t</span> recv_if;
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>uint16_t</span> send_if;
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>uint32_t</span> vpcid;
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>uint16_t</span> segsz;
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>uint16_t</span> l2_len;
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>uint16_t</span> l3_len;
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>uint16_t</span> l4_len;
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>uint64_t</span> mbuf_oflag;
+</span></span><span style=display:flex><span>};
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>struct</span> trace_skbinfo {
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>uint16_t</span>  init: <span style=color:#2aa198>1</span>,
+</span></span><span style=display:flex><span>         tcp_state: <span style=color:#2aa198>4</span>,
+</span></span><span style=display:flex><span>         reserved: <span style=color:#2aa198>11</span>;
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>uint16_t</span> action_cnt[DIR_COUNT]; <span style=color:#586e75>// ct最终执行的action个数
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>    <span style=color:#dc322f>ct_tuple_t</span> tuple[DIR_COUNT];  <span style=color:#586e75>// ct五元组信息
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>    <span style=color:#dc322f>uint32_t</span> vmip;
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>obj_id_t</span> ct_id; <span style=color:#586e75>// conntrack id
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>};
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>struct</span> trace_point {
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>short</span> ctx;  <span style=color:#586e75>// 观测点
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>    <span style=color:#dc322f>short</span> err;  <span style=color:#586e75>// 错误码
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>    <span style=color:#dc322f>uint32_t</span> tsc; <span style=color:#586e75>// 时间戳
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>};
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>struct</span> trace_record {
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>uint64_t</span> seq;
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>uint64_t</span> rx_tsc;
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>uint32_t</span> flags;
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>uint16_t</span> tid;
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>uint16_t</span> nr_point;
+</span></span><span style=display:flex><span>    <span style=color:#719e07>struct</span> trace_point points[<span style=color:#2aa198>32</span>];
+</span></span><span style=display:flex><span>    <span style=color:#719e07>struct</span> trace_skb skbs[<span style=color:#2aa198>2</span>];  <span style=color:#586e75>// rx和tx时的skb
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>    <span style=color:#719e07>struct</span> trace_skbinfo skbinfo; <span style=color:#586e75>// 扩展信息
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>};
+</span></span></code></pre></div><h3 id=trace语法>trace语法</h3><p>下面是一个典型使用样例</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span>packet rx
+</span></span><span style=display:flex><span><span style=color:#268bd2>TRACE_BEGIN</span>()
+</span></span><span style=display:flex><span>    <span style=color:#719e07>do</span> logic
+</span></span><span style=display:flex><span>        ...
+</span></span><span style=display:flex><span><span style=color:#268bd2>TRACE_POINT</span>()
+</span></span><span style=display:flex><span>   <span style=color:#719e07>do</span> logic
+</span></span><span style=display:flex><span>        ...
+</span></span><span style=display:flex><span><span style=color:#268bd2>TRACE_ERROR</span>()
+</span></span><span style=display:flex><span>   <span style=color:#719e07>do</span> logic
+</span></span><span style=display:flex><span>        ...
+</span></span><span style=display:flex><span><span style=color:#268bd2>TRACE_SEND</span>()
+</span></span><span style=display:flex><span><span style=color:#268bd2>TRACE_END</span>()
+</span></span><span style=display:flex><span>packet tx
+</span></span></code></pre></div><ul><li><p>trace_begin</p><ul><li>初始化trace_record</li><li>拷贝ingress时的skb</li></ul><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#268bd2>inline</span> <span style=color:#719e07>struct</span> trace_record <span style=color:#719e07>*</span>
+</span></span><span style=display:flex><span><span style=color:#268bd2>trace_begin</span>(<span style=color:#719e07>struct</span> sk_buff <span style=color:#719e07>*</span>skb, <span style=color:#dc322f>int</span> ctx,
+</span></span><span style=display:flex><span>        <span style=color:#dc322f>int</span> has_eth_hdr)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>    <span style=color:#719e07>struct</span> trace_record <span style=color:#719e07>*</span>record;
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>trace_ring_t</span> <span style=color:#719e07>*</span>ring;
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>trace_filter_t</span> trace_filter <span style=color:#719e07>=</span> g_trace_filter;
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>int</span> tid;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#719e07>if</span> (<span style=color:#268bd2>unlikely</span>(trace_filter <span style=color:#719e07>&amp;&amp;</span> <span style=color:#268bd2>trace_filter</span>(skb, ctx, has_eth_hdr) <span style=color:#719e07>!=</span> <span style=color:#2aa198>0</span>)) {
+</span></span><span style=display:flex><span>        <span style=color:#719e07>return</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    tid <span style=color:#719e07>=</span> <span style=color:#268bd2>pal_thread_id</span>();
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    ring <span style=color:#719e07>=</span> <span style=color:#268bd2>get_trace_ring</span>(tid);
+</span></span><span style=display:flex><span>    <span style=color:#719e07>if</span> (<span style=color:#268bd2>unlikely</span>(ring <span style=color:#719e07>==</span> <span style=color:#b58900>NULL</span>)) {
+</span></span><span style=display:flex><span>        <span style=color:#719e07>return</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    record <span style=color:#719e07>=</span> <span style=color:#268bd2>obj_ring_write_prepare</span>(ring);
+</span></span><span style=display:flex><span>    record<span style=color:#719e07>-&gt;</span>rx_tsc <span style=color:#719e07>=</span> <span style=color:#268bd2>pal_thread_conf</span>(tid)<span style=color:#719e07>-&gt;</span>start_cycle;
+</span></span><span style=display:flex><span>    record<span style=color:#719e07>-&gt;</span>flags <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>    record<span style=color:#719e07>-&gt;</span>tid <span style=color:#719e07>=</span> tid;
+</span></span><span style=display:flex><span>    record<span style=color:#719e07>-&gt;</span>nr_point <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>    record<span style=color:#719e07>-&gt;</span>skbinfo.tcp_state <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>    record<span style=color:#719e07>-&gt;</span>skbinfo.ct_id <span style=color:#719e07>=</span> OBJ_ID_NULL;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    record<span style=color:#719e07>-&gt;</span>skbs[<span style=color:#2aa198>0</span>].pkt_len <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>    record<span style=color:#719e07>-&gt;</span>skbs[<span style=color:#2aa198>1</span>].pkt_len <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#719e07>if</span> (<span style=color:#268bd2>trace_enabled</span>(skb<span style=color:#719e07>-&gt;</span>recv_if, TRACE_ON_POINTS)) {
+</span></span><span style=display:flex><span>        <span style=color:#268bd2>trace_add_point</span>(record, ctx, <span style=color:#2aa198>0</span>);
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#719e07>if</span> (<span style=color:#268bd2>trace_enabled</span>(skb<span style=color:#719e07>-&gt;</span>recv_if, TRACE_ON_RX)) {
+</span></span><span style=display:flex><span>        <span style=color:#268bd2>trace_set_skb</span>(record, skb, <span style=color:#2aa198>0</span>, has_eth_hdr);
+</span></span><span style=display:flex><span>        <span style=color:#268bd2>trace_set_skbinfo</span>(<span style=color:#719e07>&amp;</span>record<span style=color:#719e07>-&gt;</span>skbinfo, <span style=color:#b58900>NULL</span>);
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    skb<span style=color:#719e07>-&gt;</span>trace <span style=color:#719e07>=</span> record;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#719e07>return</span> record;
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div></li><li><p>trace_point</p><ul><li><p>为trace_record的points增加一个观测点</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#268bd2>inline</span> <span style=color:#dc322f>void</span>
+</span></span><span style=display:flex><span><span style=color:#268bd2>trace_point</span>(<span style=color:#719e07>struct</span> trace_record <span style=color:#719e07>*</span>record, <span style=color:#dc322f>int</span> ctx, <span style=color:#dc322f>int</span> err)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>    <span style=color:#719e07>if</span> (record<span style=color:#719e07>-&gt;</span>nr_point <span style=color:#719e07>&amp;&amp;</span> record<span style=color:#719e07>-&gt;</span>nr_point <span style=color:#719e07>&lt;</span> <span style=color:#268bd2>ARRAY_SIZE</span>(record<span style=color:#719e07>-&gt;</span>points)) {
+</span></span><span style=display:flex><span>        <span style=color:#268bd2>trace_add_point</span>(record, ctx, err);
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div></li></ul></li><li><p>trace_error</p><ul><li>为trace_record的points增加一个带错误码的观测点</li></ul></li><li><p>trace_end</p><ul><li><p>增加end观测点</p></li><li><p>将record写到cpu对应的ring</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#268bd2>inline</span> <span style=color:#dc322f>void</span>
+</span></span><span style=display:flex><span><span style=color:#268bd2>trace_end</span>(<span style=color:#719e07>struct</span> trace_record <span style=color:#719e07>*</span>record, <span style=color:#dc322f>int</span> err)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>    <span style=color:#dc322f>trace_ring_t</span> <span style=color:#719e07>*</span>ring;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>record) {
+</span></span><span style=display:flex><span>        <span style=color:#719e07>return</span>;
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#719e07>if</span> (record<span style=color:#719e07>-&gt;</span>skbs[<span style=color:#2aa198>0</span>].pkt_len <span style=color:#719e07>==</span> <span style=color:#2aa198>0</span> <span style=color:#719e07>&amp;&amp;</span> record<span style=color:#719e07>-&gt;</span>skbs[<span style=color:#2aa198>1</span>].pkt_len <span style=color:#719e07>==</span> <span style=color:#2aa198>0</span>) {
+</span></span><span style=display:flex><span>        <span style=color:#719e07>return</span>;
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#268bd2>trace_point</span>(record, TRACE_POINT_end, err);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    ring <span style=color:#719e07>=</span> <span style=color:#268bd2>get_trace_ring</span>(record<span style=color:#719e07>-&gt;</span>tid);
+</span></span><span style=display:flex><span>    <span style=color:#719e07>if</span> (ring) {
+</span></span><span style=display:flex><span>        <span style=color:#268bd2>obj_ring_write_commit</span>(ring);
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div></li></ul></li><li><p>trace_send</p><ul><li>增加一个观测点</li><li>拷贝egress时的skb</li></ul><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#268bd2>inline</span> <span style=color:#dc322f>void</span>
+</span></span><span style=display:flex><span><span style=color:#268bd2>trace_send</span>(<span style=color:#719e07>struct</span> sk_buff <span style=color:#719e07>*</span>skb, <span style=color:#dc322f>int</span> ctx)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>    <span style=color:#719e07>struct</span> trace_record <span style=color:#719e07>*</span>record <span style=color:#719e07>=</span> skb<span style=color:#719e07>-&gt;</span>trace;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#268bd2>trace_point</span>(record, ctx, <span style=color:#2aa198>0</span>);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#719e07>if</span> (<span style=color:#268bd2>trace_enabled</span>(skb<span style=color:#719e07>-&gt;</span>send_if, TRACE_ON_TX)) {
+</span></span><span style=display:flex><span>        <span style=color:#268bd2>trace_set_skb</span>(record, skb, <span style=color:#2aa198>1</span>, <span style=color:#2aa198>1</span>);  <span style=color:#586e75>// trace tx
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>    }
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div></li></ul><h3 id=trace_reader>trace_reader</h3><p>reader打开内存文件读取record，每一个ring相应的需要创建对应的cache。</p><p>由于dump打印到标准输出的速度较慢，大流量场景下，cache可能会被打满，因此需要read和lost统计</p><p>按照trace_option对trace_record进行过滤</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#719e07>struct</span> trace_reader {
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> trace_cache percpu[<span style=color:#268bd2>ARRAY_SIZE</span>(g_trace<span style=color:#719e07>-&gt;</span>percpu)];
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>uint64_t</span> start_time_usec;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>uint64_t</span> start_time_tsc;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>size_t</span> nr_read;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>size_t</span> nr_lost;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>size_t</span> nr_filtered;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> trace_option option;
+</span></span><span style=display:flex><span>};
+</span></span></code></pre></div><p>record解析流程</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#dc322f>void</span> <span style=color:#719e07>*</span><span style=color:#268bd2>trace_skb_header</span>(<span style=color:#719e07>struct</span> trace_skb <span style=color:#719e07>*</span>skb, <span style=color:#dc322f>uint16_t</span> offset, <span style=color:#dc322f>uint16_t</span> size)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>uint16_t</span> data_len <span style=color:#719e07>=</span> <span style=color:#268bd2>RTE_MIN</span>((<span style=color:#dc322f>size_t</span>)skb<span style=color:#719e07>-&gt;</span>pkt_len, <span style=color:#719e07>sizeof</span>(skb<span style=color:#719e07>-&gt;</span>data));
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (offset <span style=color:#719e07>&gt;=</span> data_len <span style=color:#719e07>||</span> offset <span style=color:#719e07>+</span> size <span style=color:#719e07>&gt;</span> data_len)
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> skb<span style=color:#719e07>-&gt;</span>data <span style=color:#719e07>+</span> offset;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>#define TRACE_SKB_HEADER(skb, offset, type) \
+</span></span></span><span style=display:flex><span><span style=color:#719e07>	((type *)trace_skb_header(skb, offset, sizeof(type)))
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span>
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>#define VALUE_IN_RANGE(v, min, max)	((v) &gt;= (min) &amp;&amp; (v) &lt;= (max))
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#dc322f>int</span> <span style=color:#268bd2>match_addr</span>(<span style=color:#719e07>struct</span> addr_filter <span style=color:#719e07>*</span>af, u32 ip, u16 port)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span><span style=color:#268bd2>VALUE_IN_RANGE</span>(ip, af<span style=color:#719e07>-&gt;</span>ip_min, af<span style=color:#719e07>-&gt;</span>ip_max))
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span><span style=color:#268bd2>VALUE_IN_RANGE</span>(port, af<span style=color:#719e07>-&gt;</span>port_min, af<span style=color:#719e07>-&gt;</span>port_max))
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> <span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#dc322f>int</span> <span style=color:#268bd2>match_tuple</span>(<span style=color:#719e07>struct</span> tuple_filter <span style=color:#719e07>*</span>tf, u32 sip, u32 dip, u16 sport, u16 dport)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#268bd2>match_addr</span>(<span style=color:#719e07>&amp;</span>tf<span style=color:#719e07>-&gt;</span>src, sip, sport) <span style=color:#719e07>&amp;&amp;</span> <span style=color:#268bd2>match_addr</span>(<span style=color:#719e07>&amp;</span>tf<span style=color:#719e07>-&gt;</span>dst, dip, dport))
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (tf<span style=color:#719e07>-&gt;</span>nr_dir <span style=color:#719e07>==</span> <span style=color:#2aa198>1</span>)
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#268bd2>match_addr</span>(<span style=color:#719e07>&amp;</span>tf<span style=color:#719e07>-&gt;</span>dst, sip, sport) <span style=color:#719e07>&amp;&amp;</span> <span style=color:#268bd2>match_addr</span>(<span style=color:#719e07>&amp;</span>tf<span style=color:#719e07>-&gt;</span>src, dip, dport))
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#719e07>struct</span> pal_ip_hdr <span style=color:#719e07>*</span><span style=color:#268bd2>parse_trace_skb</span>(<span style=color:#719e07>struct</span> trace_skb <span style=color:#719e07>*</span>skb, <span style=color:#dc322f>uint32_t</span> <span style=color:#719e07>*</span>vpcid,
+</span></span><span style=display:flex><span>				<span style=color:#719e07>struct</span> pal_l4port_hdr <span style=color:#719e07>**</span>l4h, <span style=color:#dc322f>uint16_t</span> <span style=color:#719e07>*</span>l3_proto)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> pal_ip_hdr <span style=color:#719e07>*</span>iph;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> pal_geneve_hdr <span style=color:#719e07>*</span>genh;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>uint16_t</span> off <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>*</span>vpcid <span style=color:#719e07>=</span> skb<span style=color:#719e07>-&gt;</span>vpcid;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (skb<span style=color:#719e07>-&gt;</span>has_eth_hdr) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>struct</span> pal_eth_hdr <span style=color:#719e07>*</span>eth <span style=color:#719e07>=</span> <span style=color:#268bd2>TRACE_SKB_HEADER</span>(skb, off, <span style=color:#719e07>struct</span> pal_eth_hdr);
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>eth)
+</span></span><span style=display:flex><span>			<span style=color:#719e07>return</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>		<span style=color:#719e07>*</span>l3_proto <span style=color:#719e07>=</span> <span style=color:#268bd2>pal_ntohs</span>(eth<span style=color:#719e07>-&gt;</span>type);
+</span></span><span style=display:flex><span>		off <span style=color:#719e07>+=</span> <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> pal_eth_hdr);
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	iph <span style=color:#719e07>=</span> <span style=color:#268bd2>TRACE_SKB_HEADER</span>(skb, off, <span style=color:#719e07>struct</span> pal_ip_hdr);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>iph)
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	off <span style=color:#719e07>+=</span> iph<span style=color:#719e07>-&gt;</span>ihl <span style=color:#719e07>&lt;&lt;</span> <span style=color:#2aa198>2</span>;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>*</span>l4h <span style=color:#719e07>=</span> <span style=color:#268bd2>TRACE_SKB_HEADER</span>(skb, off, <span style=color:#719e07>struct</span> pal_l4port_hdr);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (iph<span style=color:#719e07>-&gt;</span>protocol <span style=color:#719e07>==</span> PAL_IPPROTO_UDP <span style=color:#719e07>&amp;&amp;</span> <span style=color:#719e07>!</span><span style=color:#268bd2>ip_is_fragment</span>(iph) <span style=color:#719e07>&amp;&amp;</span> (<span style=color:#719e07>*</span>l4h)<span style=color:#719e07>-&gt;</span>dest <span style=color:#719e07>==</span> <span style=color:#268bd2>pal_ntohs</span>(GENEVE_PORT)) {
+</span></span><span style=display:flex><span>		off <span style=color:#719e07>+=</span> <span style=color:#2aa198>8</span>;
+</span></span><span style=display:flex><span>		genh <span style=color:#719e07>=</span> <span style=color:#268bd2>TRACE_SKB_HEADER</span>(skb, off, <span style=color:#719e07>struct</span> pal_geneve_hdr);
+</span></span><span style=display:flex><span>		<span style=color:#719e07>*</span>vpcid <span style=color:#719e07>=</span> ((<span style=color:#dc322f>uint32_t</span>)genh<span style=color:#719e07>-&gt;</span>vni[<span style=color:#2aa198>0</span>] <span style=color:#719e07>&lt;&lt;</span> <span style=color:#2aa198>16</span>) <span style=color:#719e07>|</span> ((<span style=color:#dc322f>uint32_t</span>)genh<span style=color:#719e07>-&gt;</span>vni[<span style=color:#2aa198>1</span>] <span style=color:#719e07>&lt;&lt;</span> <span style=color:#2aa198>8</span>) <span style=color:#719e07>|</span> (<span style=color:#dc322f>uint32_t</span>)genh<span style=color:#719e07>-&gt;</span>vni[<span style=color:#2aa198>2</span>];
+</span></span><span style=display:flex><span>		off <span style=color:#719e07>+=</span> <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>*</span>genh) <span style=color:#719e07>+</span> (genh<span style=color:#719e07>-&gt;</span>opt_len <span style=color:#719e07>&lt;&lt;</span> <span style=color:#2aa198>2</span>);
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (genh<span style=color:#719e07>-&gt;</span>proto <span style=color:#719e07>==</span> <span style=color:#268bd2>pal_ntohs</span>(GENEVE_TYPE_ETH)) {
+</span></span><span style=display:flex><span>			<span style=color:#719e07>struct</span> pal_eth_hdr <span style=color:#719e07>*</span>eth <span style=color:#719e07>=</span> <span style=color:#268bd2>TRACE_SKB_HEADER</span>(skb, off, <span style=color:#719e07>struct</span> pal_eth_hdr);
+</span></span><span style=display:flex><span>			<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>eth)
+</span></span><span style=display:flex><span>				<span style=color:#719e07>return</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>			<span style=color:#719e07>*</span>l3_proto <span style=color:#719e07>=</span> <span style=color:#268bd2>pal_ntohs</span>(eth<span style=color:#719e07>-&gt;</span>type);
+</span></span><span style=display:flex><span>			off <span style=color:#719e07>+=</span> <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> pal_eth_hdr);
+</span></span><span style=display:flex><span>		} <span style=color:#719e07>else</span> <span style=color:#719e07>if</span> (genh<span style=color:#719e07>-&gt;</span>proto <span style=color:#719e07>==</span> <span style=color:#268bd2>pal_ntohs</span>(GENEVE_TYPE_IPV4)){
+</span></span><span style=display:flex><span>			<span style=color:#719e07>*</span>l3_proto <span style=color:#719e07>=</span> <span style=color:#268bd2>pal_ntohs</span>(genh<span style=color:#719e07>-&gt;</span>proto);
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>		iph <span style=color:#719e07>=</span> <span style=color:#268bd2>TRACE_SKB_HEADER</span>(skb, off, <span style=color:#719e07>struct</span> pal_ip_hdr);
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>iph)
+</span></span><span style=display:flex><span>			<span style=color:#719e07>return</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>		off <span style=color:#719e07>+=</span> iph<span style=color:#719e07>-&gt;</span>ihl <span style=color:#719e07>&lt;&lt;</span> <span style=color:#2aa198>2</span>;
+</span></span><span style=display:flex><span>		<span style=color:#719e07>*</span>l4h <span style=color:#719e07>=</span> <span style=color:#268bd2>TRACE_SKB_HEADER</span>(skb, off, <span style=color:#719e07>struct</span> pal_l4port_hdr);
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> iph;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#dc322f>void</span> <span style=color:#268bd2>pop_outer_header</span>(<span style=color:#719e07>struct</span> trace_skb <span style=color:#719e07>*</span>skb)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> pal_ip_hdr <span style=color:#719e07>*</span>outer_iph, <span style=color:#719e07>*</span>inner_iph;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> pal_geneve_hdr <span style=color:#719e07>*</span>genh;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>uint16_t</span> off <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>uint16_t</span> move_len <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (skb<span style=color:#719e07>-&gt;</span>has_eth_hdr) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>struct</span> pal_eth_hdr <span style=color:#719e07>*</span>eth <span style=color:#719e07>=</span> <span style=color:#268bd2>TRACE_SKB_HEADER</span>(skb, off, <span style=color:#719e07>struct</span> pal_eth_hdr);
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>eth)
+</span></span><span style=display:flex><span>			<span style=color:#719e07>return</span>;
+</span></span><span style=display:flex><span>		off <span style=color:#719e07>+=</span> <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> pal_eth_hdr);
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	outer_iph <span style=color:#719e07>=</span> <span style=color:#268bd2>TRACE_SKB_HEADER</span>(skb, off, <span style=color:#719e07>struct</span> pal_ip_hdr);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>outer_iph)
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	off <span style=color:#719e07>+=</span> outer_iph<span style=color:#719e07>-&gt;</span>ihl <span style=color:#719e07>&lt;&lt;</span> <span style=color:#2aa198>2</span>;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (outer_iph<span style=color:#719e07>-&gt;</span>protocol <span style=color:#719e07>!=</span> PAL_IPPROTO_UDP <span style=color:#719e07>||</span> <span style=color:#268bd2>ip_is_fragment</span>(outer_iph))
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span>;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> pal_udp_hdr <span style=color:#719e07>*</span>udph <span style=color:#719e07>=</span> <span style=color:#268bd2>TRACE_SKB_HEADER</span>(skb, off, <span style=color:#719e07>struct</span> pal_udp_hdr);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (udph<span style=color:#719e07>-&gt;</span>dest <span style=color:#719e07>!=</span> <span style=color:#268bd2>pal_ntohs</span>(GENEVE_PORT))
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span>;
+</span></span><span style=display:flex><span>	off <span style=color:#719e07>+=</span> <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>*</span>udph);
+</span></span><span style=display:flex><span>	genh <span style=color:#719e07>=</span> <span style=color:#268bd2>TRACE_SKB_HEADER</span>(skb, off, <span style=color:#719e07>struct</span> pal_geneve_hdr);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>genh)
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span>;
+</span></span><span style=display:flex><span>	off <span style=color:#719e07>+=</span> <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>*</span>genh) <span style=color:#719e07>+</span> (genh<span style=color:#719e07>-&gt;</span>opt_len <span style=color:#719e07>&lt;&lt;</span> <span style=color:#2aa198>2</span>);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (genh<span style=color:#719e07>-&gt;</span>proto <span style=color:#719e07>==</span> <span style=color:#268bd2>pal_ntohs</span>(GENEVE_TYPE_ETH))
+</span></span><span style=display:flex><span>		off <span style=color:#719e07>+=</span> <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> pal_eth_hdr);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	inner_iph <span style=color:#719e07>=</span> <span style=color:#268bd2>TRACE_SKB_HEADER</span>(skb, off, <span style=color:#719e07>struct</span> pal_ip_hdr);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>inner_iph)
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	move_len <span style=color:#719e07>=</span> skb<span style=color:#719e07>-&gt;</span>data <span style=color:#719e07>+</span> skb<span style=color:#719e07>-&gt;</span>pkt_len <span style=color:#719e07>-</span> (<span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>)inner_iph;
+</span></span><span style=display:flex><span>	skb<span style=color:#719e07>-&gt;</span>pkt_len <span style=color:#719e07>-=</span> (<span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>)inner_iph <span style=color:#719e07>-</span> (<span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>)outer_iph;
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>memmove</span>(outer_iph, inner_iph, move_len);
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#dc322f>void</span> <span style=color:#268bd2>mangle_skb</span>(<span style=color:#719e07>struct</span> trace_option <span style=color:#719e07>*</span>opt, <span style=color:#719e07>struct</span> trace_record <span style=color:#719e07>*</span>r)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> trace_skb <span style=color:#719e07>*</span>rx_skb <span style=color:#719e07>=</span> <span style=color:#719e07>&amp;</span>r<span style=color:#719e07>-&gt;</span>skbs[<span style=color:#2aa198>0</span>];
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> trace_skb <span style=color:#719e07>*</span>tx_skb <span style=color:#719e07>=</span> <span style=color:#719e07>&amp;</span>r<span style=color:#719e07>-&gt;</span>skbs[<span style=color:#2aa198>1</span>];
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (opt<span style=color:#719e07>-&gt;</span>inner) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>pop_outer_header</span>(rx_skb);
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>pop_outer_header</span>(tx_skb);
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#dc322f>int</span> <span style=color:#268bd2>match_skb</span>(<span style=color:#719e07>struct</span> trace_option <span style=color:#719e07>*</span>opt, <span style=color:#719e07>struct</span> trace_skb <span style=color:#719e07>*</span>skb)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>uint16_t</span> l3_proto <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> pal_ip_hdr <span style=color:#719e07>*</span>iph;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> pal_l4port_hdr <span style=color:#719e07>*</span>l4h <span style=color:#719e07>=</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>uint32_t</span> vpcid <span style=color:#719e07>=</span> <span style=color:#719e07>-</span><span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>skb<span style=color:#719e07>-&gt;</span>pkt_len)
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	iph <span style=color:#719e07>=</span> <span style=color:#268bd2>parse_trace_skb</span>(skb, <span style=color:#719e07>&amp;</span>vpcid, <span style=color:#719e07>&amp;</span>l4h, <span style=color:#719e07>&amp;</span>l3_proto);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (opt<span style=color:#719e07>-&gt;</span>arp) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> l3_proto <span style=color:#719e07>==</span> PAL_ETH_ARP;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (opt<span style=color:#719e07>-&gt;</span>vpcid <span style=color:#719e07>!=</span> <span style=color:#719e07>-</span><span style=color:#2aa198>1u</span> <span style=color:#719e07>&amp;&amp;</span> opt<span style=color:#719e07>-&gt;</span>vpcid <span style=color:#719e07>!=</span> vpcid)
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (iph <span style=color:#719e07>&amp;&amp;</span> <span style=color:#268bd2>ip_is_fragment</span>(iph) <span style=color:#719e07>&amp;&amp;</span> opt<span style=color:#719e07>-&gt;</span>ip_frag <span style=color:#719e07>==</span> <span style=color:#2aa198>0</span>)
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>opt<span style=color:#719e07>-&gt;</span>tuple.proto <span style=color:#719e07>&amp;&amp;</span> <span style=color:#719e07>!</span>opt<span style=color:#719e07>-&gt;</span>tuple.nr_dir)
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (iph) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (opt<span style=color:#719e07>-&gt;</span>tuple.proto <span style=color:#719e07>&amp;&amp;</span> opt<span style=color:#719e07>-&gt;</span>tuple.proto <span style=color:#719e07>!=</span> iph<span style=color:#719e07>-&gt;</span>protocol)
+</span></span><span style=display:flex><span>			<span style=color:#719e07>return</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>opt<span style=color:#719e07>-&gt;</span>tuple.nr_dir)
+</span></span><span style=display:flex><span>			<span style=color:#719e07>return</span> <span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (l4h <span style=color:#719e07>&amp;&amp;</span> <span style=color:#719e07>!</span><span style=color:#268bd2>ip_is_fragment</span>(iph)) {
+</span></span><span style=display:flex><span>			<span style=color:#719e07>return</span> <span style=color:#268bd2>match_tuple</span>(<span style=color:#719e07>&amp;</span>opt<span style=color:#719e07>-&gt;</span>tuple,
+</span></span><span style=display:flex><span>							   <span style=color:#268bd2>ntohl</span>(iph<span style=color:#719e07>-&gt;</span>saddr), <span style=color:#268bd2>ntohl</span>(iph<span style=color:#719e07>-&gt;</span>daddr),
+</span></span><span style=display:flex><span>							   <span style=color:#268bd2>ntohs</span>(l4h<span style=color:#719e07>-&gt;</span>source), <span style=color:#268bd2>ntohs</span>(l4h<span style=color:#719e07>-&gt;</span>dest));
+</span></span><span style=display:flex><span>		} <span style=color:#719e07>else</span> {
+</span></span><span style=display:flex><span>			<span style=color:#586e75>/* match l3 only */</span>
+</span></span><span style=display:flex><span>			<span style=color:#719e07>return</span> <span style=color:#268bd2>match_tuple</span>(<span style=color:#719e07>&amp;</span>opt<span style=color:#719e07>-&gt;</span>tuple,
+</span></span><span style=display:flex><span>							<span style=color:#268bd2>ntohl</span>(iph<span style=color:#719e07>-&gt;</span>saddr), <span style=color:#268bd2>ntohl</span>(iph<span style=color:#719e07>-&gt;</span>daddr),
+</span></span><span style=display:flex><span>							opt<span style=color:#719e07>-&gt;</span>tuple.src.port_min, opt<span style=color:#719e07>-&gt;</span>tuple.dst.port_min);
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#dc322f>int</span> <span style=color:#268bd2>match_record</span>(<span style=color:#719e07>struct</span> trace_option <span style=color:#719e07>*</span>opt, <span style=color:#719e07>struct</span> trace_record <span style=color:#719e07>*</span>r)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> trace_skb <span style=color:#719e07>*</span>rx_skb <span style=color:#719e07>=</span> <span style=color:#719e07>&amp;</span>r<span style=color:#719e07>-&gt;</span>skbs[<span style=color:#2aa198>0</span>];
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> trace_skb <span style=color:#719e07>*</span>tx_skb <span style=color:#719e07>=</span> <span style=color:#719e07>&amp;</span>r<span style=color:#719e07>-&gt;</span>skbs[<span style=color:#2aa198>1</span>];
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (opt<span style=color:#719e07>-&gt;</span>pkt_err <span style=color:#719e07>&amp;&amp;</span> r<span style=color:#719e07>-&gt;</span>nr_point <span style=color:#719e07>&amp;&amp;</span>
+</span></span><span style=display:flex><span>		r<span style=color:#719e07>-&gt;</span>points[r<span style=color:#719e07>-&gt;</span>nr_point<span style=color:#719e07>-</span><span style=color:#2aa198>1</span>].err <span style=color:#719e07>!=</span> opt<span style=color:#719e07>-&gt;</span>pkt_err)
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span><span style=color:#268bd2>trace_option_has</span>(opt, rx_skb<span style=color:#719e07>-&gt;</span>recv_if, TRACE_ON_RX) <span style=color:#719e07>&amp;&amp;</span>
+</span></span><span style=display:flex><span>		<span style=color:#719e07>!</span><span style=color:#268bd2>trace_option_has</span>(opt, tx_skb<span style=color:#719e07>-&gt;</span>send_if, TRACE_ON_TX))
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span><span style=color:#268bd2>match_skb</span>(opt, rx_skb) <span style=color:#719e07>&amp;&amp;</span>
+</span></span><span style=display:flex><span>		<span style=color:#719e07>!</span><span style=color:#268bd2>match_skb</span>(opt, tx_skb))
+</span></span><span style=display:flex><span>		<span style=color:#719e07>return</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> <span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#dc322f>void</span> <span style=color:#268bd2>trace_cache_init</span>(<span style=color:#719e07>struct</span> trace_cache <span style=color:#719e07>*</span>c, <span style=color:#dc322f>trace_ring_t</span> <span style=color:#719e07>*</span>ring)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	c<span style=color:#719e07>-&gt;</span>ring <span style=color:#719e07>=</span> ring;
+</span></span><span style=display:flex><span>	c<span style=color:#719e07>-&gt;</span>next_seq <span style=color:#719e07>=</span> <span style=color:#268bd2>obj_ring_next_seq</span>(ring);
+</span></span><span style=display:flex><span>	c<span style=color:#719e07>-&gt;</span>nr_lost <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>	c<span style=color:#719e07>-&gt;</span>r <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>	c<span style=color:#719e07>-&gt;</span>w <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#719e07>struct</span> trace_record <span style=color:#719e07>*</span><span style=color:#268bd2>trace_cache_at</span>(<span style=color:#719e07>struct</span> trace_cache <span style=color:#719e07>*</span>c, <span style=color:#dc322f>size_t</span> index)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> <span style=color:#719e07>&amp;</span>c<span style=color:#719e07>-&gt;</span>records[index <span style=color:#719e07>&amp;</span> (<span style=color:#268bd2>ARRAY_SIZE</span>(c<span style=color:#719e07>-&gt;</span>records) <span style=color:#719e07>-</span> <span style=color:#2aa198>1</span>)];
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#dc322f>int</span> <span style=color:#268bd2>trace_cache_full</span>(<span style=color:#719e07>struct</span> trace_cache <span style=color:#719e07>*</span>c)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> c<span style=color:#719e07>-&gt;</span>w <span style=color:#719e07>-</span> c<span style=color:#719e07>-&gt;</span>r <span style=color:#719e07>&gt;=</span> <span style=color:#268bd2>ARRAY_SIZE</span>(c<span style=color:#719e07>-&gt;</span>records);
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#dc322f>int</span> <span style=color:#268bd2>trace_cache_empty</span>(<span style=color:#719e07>struct</span> trace_cache <span style=color:#719e07>*</span>c)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> c<span style=color:#719e07>-&gt;</span>w <span style=color:#719e07>==</span> c<span style=color:#719e07>-&gt;</span>r;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#dc322f>void</span>  <span style=color:#268bd2>trace_cache_fill</span>(<span style=color:#719e07>struct</span> trace_cache <span style=color:#719e07>*</span>c, <span style=color:#719e07>struct</span> trace_option <span style=color:#719e07>*</span>opt)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> trace_record <span style=color:#719e07>*</span>r;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>while</span> (<span style=color:#719e07>!</span><span style=color:#268bd2>trace_cache_full</span>(c)) {
+</span></span><span style=display:flex><span>		r <span style=color:#719e07>=</span> <span style=color:#268bd2>trace_cache_at</span>(c, c<span style=color:#719e07>-&gt;</span>w);
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span><span style=color:#268bd2>obj_ring_read</span>(c<span style=color:#719e07>-&gt;</span>ring, c<span style=color:#719e07>-&gt;</span>next_seq, r))
+</span></span><span style=display:flex><span>			<span style=color:#719e07>break</span>;
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>assert</span>(r<span style=color:#719e07>-&gt;</span>seq <span style=color:#719e07>&gt;=</span> c<span style=color:#719e07>-&gt;</span>next_seq);
+</span></span><span style=display:flex><span>		c<span style=color:#719e07>-&gt;</span>nr_lost <span style=color:#719e07>+=</span> r<span style=color:#719e07>-&gt;</span>seq <span style=color:#719e07>-</span> c<span style=color:#719e07>-&gt;</span>next_seq;
+</span></span><span style=display:flex><span>		c<span style=color:#719e07>-&gt;</span>next_seq <span style=color:#719e07>=</span> r<span style=color:#719e07>-&gt;</span>seq <span style=color:#719e07>+</span> <span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (<span style=color:#268bd2>match_record</span>(opt, r)) {
+</span></span><span style=display:flex><span>			c<span style=color:#719e07>-&gt;</span>w<span style=color:#719e07>++</span>;
+</span></span><span style=display:flex><span>			<span style=color:#268bd2>mangle_skb</span>(opt, r);
+</span></span><span style=display:flex><span>		} <span style=color:#719e07>else</span>
+</span></span><span style=display:flex><span>			c<span style=color:#719e07>-&gt;</span>nr_filtered<span style=color:#719e07>++</span>;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#dc322f>void</span> <span style=color:#268bd2>trace_option_sync</span>(<span style=color:#719e07>struct</span> trace_option <span style=color:#719e07>*</span>opt)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>int</span> port_id;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>int</span> i;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>fp_memory_set_writable</span>(g_trace, <span style=color:#2aa198>1</span>);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>for</span> (port_id <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>; port_id <span style=color:#719e07>&lt;</span> PAL_MAX_PORT; port_id<span style=color:#719e07>++</span>) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>for</span> (i <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>; i <span style=color:#719e07>&lt;</span> NR_TRACE_ON; i<span style=color:#719e07>++</span>) {
+</span></span><span style=display:flex><span>			<span style=color:#719e07>if</span> (<span style=color:#268bd2>trace_option_has</span>(opt, port_id, i))
+</span></span><span style=display:flex><span>				g_trace<span style=color:#719e07>-&gt;</span>ports[port_id][i] <span style=color:#719e07>=</span> <span style=color:#2aa198>30</span>;
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>fp_memory_set_writable</span>(g_trace, <span style=color:#2aa198>0</span>);
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#dc322f>void</span> <span style=color:#719e07>*</span><span style=color:#268bd2>trace_option_thread</span>(<span style=color:#dc322f>void</span> <span style=color:#719e07>*</span>arg)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> trace_option <span style=color:#719e07>*</span>opt <span style=color:#719e07>=</span> arg;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>while</span> (<span style=color:#2aa198>1</span>) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>trace_option_sync</span>(opt);
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>sleep</span>(<span style=color:#2aa198>20</span>);
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#dc322f>void</span> <span style=color:#268bd2>trace_option_init</span>(<span style=color:#719e07>struct</span> trace_option <span style=color:#719e07>*</span>opt)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#719e07>const</span> <span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>pkt_err;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>const</span> <span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>vpcid;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>const</span> <span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>proto;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>const</span> <span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>addr;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>const</span> <span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>inner;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>const</span> <span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>ip_frag;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>const</span> <span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>count;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>const</span> <span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>file_r;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>const</span> <span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>file_w;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>const</span> <span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>arp;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>pthread_t</span> pid;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>fp_memset</span>(opt<span style=color:#719e07>-&gt;</span>ports_flags, <span style=color:#2aa198>0</span>);
+</span></span><span style=display:flex><span>	opt<span style=color:#719e07>-&gt;</span>pkt_err <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>	opt<span style=color:#719e07>-&gt;</span>vpcid <span style=color:#719e07>=</span> <span style=color:#719e07>-</span><span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span>	opt<span style=color:#719e07>-&gt;</span>inner <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>	opt<span style=color:#719e07>-&gt;</span>ip_frag <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>tuple_filter_init</span>(<span style=color:#719e07>&amp;</span>opt<span style=color:#719e07>-&gt;</span>tuple);
+</span></span><span style=display:flex><span>	opt<span style=color:#719e07>-&gt;</span>nr_read_max <span style=color:#719e07>=</span> <span style=color:#719e07>-</span><span style=color:#2aa198>1u</span>;
+</span></span><span style=display:flex><span>	opt<span style=color:#719e07>-&gt;</span>fp_r <span style=color:#719e07>=</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>	opt<span style=color:#719e07>-&gt;</span>fp_w <span style=color:#719e07>=</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	pkt_err <span style=color:#719e07>=</span> <span style=color:#268bd2>getenv</span>(<span style=color:#2aa198>&#34;dpdk_trace_error&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (pkt_err) {
+</span></span><span style=display:flex><span>		opt<span style=color:#719e07>-&gt;</span>pkt_err <span style=color:#719e07>=</span> <span style=color:#268bd2>error_code</span>(pkt_err);
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>opt<span style=color:#719e07>-&gt;</span>pkt_err) {
+</span></span><span style=display:flex><span>			<span style=color:#268bd2>fprintf</span>(stderr, <span style=color:#2aa198>&#34;Invalid trace error: %s</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>, pkt_err);
+</span></span><span style=display:flex><span>			<span style=color:#268bd2>exit</span>(<span style=color:#2aa198>1</span>);
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	vpcid <span style=color:#719e07>=</span> <span style=color:#268bd2>getenv</span>(<span style=color:#2aa198>&#34;dpdk_trace_vpcid&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (vpcid)
+</span></span><span style=display:flex><span>		opt<span style=color:#719e07>-&gt;</span>vpcid <span style=color:#719e07>=</span> <span style=color:#268bd2>strtoul</span>(vpcid, <span style=color:#b58900>NULL</span>, <span style=color:#2aa198>10</span>);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	proto <span style=color:#719e07>=</span> <span style=color:#268bd2>getenv</span>(<span style=color:#2aa198>&#34;dpdk_trace_proto&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (proto)
+</span></span><span style=display:flex><span>		opt<span style=color:#719e07>-&gt;</span>tuple.proto <span style=color:#719e07>=</span> <span style=color:#268bd2>strtoul</span>(proto, <span style=color:#b58900>NULL</span>, <span style=color:#2aa198>10</span>);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	addr <span style=color:#719e07>=</span> <span style=color:#268bd2>getenv</span>(<span style=color:#2aa198>&#34;dpdk_trace_addr&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (addr) {
+</span></span><span style=display:flex><span>		<span style=color:#dc322f>int</span> err <span style=color:#719e07>=</span> <span style=color:#268bd2>tuple_filter_parse</span>(<span style=color:#719e07>&amp;</span>opt<span style=color:#719e07>-&gt;</span>tuple, <span style=color:#719e07>&amp;</span>addr);
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (err) {
+</span></span><span style=display:flex><span>			<span style=color:#268bd2>fprintf</span>(stderr, <span style=color:#2aa198>&#34;Invalid trace addr: %s, at &#39;%s&#39;</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>,
+</span></span><span style=display:flex><span>				<span style=color:#268bd2>tuple_filter_error</span>(err), addr);
+</span></span><span style=display:flex><span>			<span style=color:#268bd2>exit</span>(<span style=color:#2aa198>1</span>);
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (<span style=color:#719e07>*</span>addr) {
+</span></span><span style=display:flex><span>			<span style=color:#268bd2>fprintf</span>(stderr, <span style=color:#2aa198>&#34;Unexpected input for trace addr: &#39;%s&#39;</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>, addr);
+</span></span><span style=display:flex><span>			<span style=color:#268bd2>exit</span>(<span style=color:#2aa198>1</span>);
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	inner <span style=color:#719e07>=</span> <span style=color:#268bd2>getenv</span>(<span style=color:#2aa198>&#34;dpdk_trace_inner&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (inner)
+</span></span><span style=display:flex><span>		opt<span style=color:#719e07>-&gt;</span>inner <span style=color:#719e07>=</span> <span style=color:#719e07>!!</span><span style=color:#268bd2>strtoul</span>(inner, <span style=color:#b58900>NULL</span>, <span style=color:#2aa198>10</span>);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	ip_frag <span style=color:#719e07>=</span> <span style=color:#268bd2>getenv</span>(<span style=color:#2aa198>&#34;dpdk_trace_ip_frag&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (ip_frag)
+</span></span><span style=display:flex><span>		opt<span style=color:#719e07>-&gt;</span>ip_frag <span style=color:#719e07>=</span> <span style=color:#719e07>!!</span><span style=color:#268bd2>strtoul</span>(ip_frag, <span style=color:#b58900>NULL</span>, <span style=color:#2aa198>10</span>);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	count <span style=color:#719e07>=</span> <span style=color:#268bd2>getenv</span>(<span style=color:#2aa198>&#34;dpdk_trace_count&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (count)
+</span></span><span style=display:flex><span>		opt<span style=color:#719e07>-&gt;</span>nr_read_max <span style=color:#719e07>=</span> <span style=color:#268bd2>strtoul</span>(count, <span style=color:#b58900>NULL</span>, <span style=color:#2aa198>10</span>);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	file_r <span style=color:#719e07>=</span> <span style=color:#268bd2>getenv</span>(<span style=color:#2aa198>&#34;dpdk_trace_read&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (file_r)
+</span></span><span style=display:flex><span>		opt<span style=color:#719e07>-&gt;</span>fp_r <span style=color:#719e07>=</span> <span style=color:#268bd2>fopen</span>(file_r, <span style=color:#2aa198>&#34;rb&#34;</span>);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	file_w <span style=color:#719e07>=</span> <span style=color:#268bd2>getenv</span>(<span style=color:#2aa198>&#34;dpdk_trace_write&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (file_w)
+</span></span><span style=display:flex><span>		opt<span style=color:#719e07>-&gt;</span>fp_w <span style=color:#719e07>=</span> <span style=color:#268bd2>fopen</span>(file_w, <span style=color:#2aa198>&#34;wb&#34;</span>);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#586e75>//trace arp only
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>	arp <span style=color:#719e07>=</span> <span style=color:#268bd2>getenv</span>(<span style=color:#2aa198>&#34;dpdk_trace_arp&#34;</span>);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (arp)
+</span></span><span style=display:flex><span>		opt<span style=color:#719e07>-&gt;</span>arp <span style=color:#719e07>=</span> <span style=color:#268bd2>strtoul</span>(arp, <span style=color:#b58900>NULL</span>, <span style=color:#2aa198>10</span>);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#268bd2>pthread_create</span>(<span style=color:#719e07>&amp;</span>pid, <span style=color:#b58900>NULL</span>, trace_option_thread, opt) <span style=color:#719e07>!=</span> <span style=color:#2aa198>0</span>) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>fprintf</span>(stderr, <span style=color:#2aa198>&#34;&lt;%s&gt; pthread_create error: %s</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>, __func__, <span style=color:#268bd2>strerror</span>(errno));
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>exit</span>(<span style=color:#2aa198>1</span>);
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#dc322f>uint64_t</span> <span style=color:#268bd2>current_time_usec</span>(<span style=color:#dc322f>void</span>)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> timeval tv;
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>gettimeofday</span>(<span style=color:#719e07>&amp;</span>tv, <span style=color:#b58900>NULL</span>);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> tv.tv_sec <span style=color:#719e07>*</span> <span style=color:#2aa198>1000000</span> <span style=color:#719e07>+</span> tv.tv_usec;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#dc322f>void</span> <span style=color:#268bd2>trace_reader_strftime</span>(<span style=color:#719e07>struct</span> trace_reader <span style=color:#719e07>*</span>reader, <span style=color:#dc322f>uint64_t</span> tsc, <span style=color:#719e07>struct</span> time_buf <span style=color:#719e07>*</span>buf)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>uint64_t</span> usec <span style=color:#719e07>=</span> <span style=color:#268bd2>trace_reader_get_usec</span>(reader, tsc);
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>time_t</span> sec <span style=color:#719e07>=</span> usec <span style=color:#719e07>/</span> <span style=color:#2aa198>1000000</span>;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> tm tm;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>localtime_r</span>(<span style=color:#719e07>&amp;</span>sec, <span style=color:#719e07>&amp;</span>tm);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	buf<span style=color:#719e07>-&gt;</span>len <span style=color:#719e07>=</span> <span style=color:#268bd2>strftime</span>(buf<span style=color:#719e07>-&gt;</span>data, <span style=color:#719e07>sizeof</span>(buf<span style=color:#719e07>-&gt;</span>data), <span style=color:#2aa198>&#34;%Y-%m-%d %H:%M:%S&#34;</span>, <span style=color:#719e07>&amp;</span>tm);
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>SPRINTF</span>(<span style=color:#719e07>*</span>buf, <span style=color:#2aa198>&#34;.%06d&#34;</span>, (<span style=color:#dc322f>int</span>)(usec <span style=color:#719e07>%</span> <span style=color:#2aa198>1000000</span>));
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#dc322f>void</span> <span style=color:#268bd2>trace_reader_init</span>(<span style=color:#719e07>struct</span> trace_reader <span style=color:#719e07>*</span>reader)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> trace_cache <span style=color:#719e07>*</span>c;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>array_for_each</span>(c, reader<span style=color:#719e07>-&gt;</span>percpu) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>trace_cache_init</span>(c, <span style=color:#719e07>&amp;</span>g_trace<span style=color:#719e07>-&gt;</span>percpu[c <span style=color:#719e07>-</span> reader<span style=color:#719e07>-&gt;</span>percpu]);
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	reader<span style=color:#719e07>-&gt;</span>start_time_usec <span style=color:#719e07>=</span> <span style=color:#268bd2>current_time_usec</span>();
+</span></span><span style=display:flex><span>	reader<span style=color:#719e07>-&gt;</span>start_time_tsc <span style=color:#719e07>=</span> <span style=color:#268bd2>rte_rdtsc</span>();
+</span></span><span style=display:flex><span>	reader<span style=color:#719e07>-&gt;</span>nr_read <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>	reader<span style=color:#719e07>-&gt;</span>nr_lost <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>	reader<span style=color:#719e07>-&gt;</span>nr_filtered <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>trace_option_init</span>(<span style=color:#719e07>&amp;</span>reader<span style=color:#719e07>-&gt;</span>option);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (reader<span style=color:#719e07>-&gt;</span>option.fp_r) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (<span style=color:#268bd2>fread</span>(<span style=color:#719e07>&amp;</span>reader<span style=color:#719e07>-&gt;</span>start_time_usec, <span style=color:#719e07>sizeof</span>(<span style=color:#dc322f>uint64_t</span>), <span style=color:#2aa198>2</span>, reader<span style=color:#719e07>-&gt;</span>option.fp_r) <span style=color:#719e07>!=</span> <span style=color:#2aa198>2</span>) {
+</span></span><span style=display:flex><span>			<span style=color:#268bd2>fprintf</span>(stderr, <span style=color:#2aa198>&#34;failed to read binary records: %s</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>, <span style=color:#268bd2>strerror</span>(errno));
+</span></span><span style=display:flex><span>			<span style=color:#268bd2>fclose</span>(reader<span style=color:#719e07>-&gt;</span>option.fp_r);
+</span></span><span style=display:flex><span>			reader<span style=color:#719e07>-&gt;</span>option.fp_r <span style=color:#719e07>=</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (reader<span style=color:#719e07>-&gt;</span>option.fp_w) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (<span style=color:#268bd2>fwrite</span>(<span style=color:#719e07>&amp;</span>reader<span style=color:#719e07>-&gt;</span>start_time_usec, <span style=color:#719e07>sizeof</span>(<span style=color:#dc322f>uint64_t</span>), <span style=color:#2aa198>2</span>, reader<span style=color:#719e07>-&gt;</span>option.fp_w) <span style=color:#719e07>!=</span> <span style=color:#2aa198>2</span>) {
+</span></span><span style=display:flex><span>			<span style=color:#268bd2>fprintf</span>(stderr, <span style=color:#2aa198>&#34;failed to write binary records: %s</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>, <span style=color:#268bd2>strerror</span>(errno));
+</span></span><span style=display:flex><span>			<span style=color:#268bd2>fclose</span>(reader<span style=color:#719e07>-&gt;</span>option.fp_w);
+</span></span><span style=display:flex><span>			reader<span style=color:#719e07>-&gt;</span>option.fp_w <span style=color:#719e07>=</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	{
+</span></span><span style=display:flex><span>		<span style=color:#719e07>struct</span> time_buf time_buf;
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>trace_reader_strftime</span>(reader, reader<span style=color:#719e07>-&gt;</span>start_time_tsc, <span style=color:#719e07>&amp;</span>time_buf);
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>fprintf</span>(stderr, <span style=color:#2aa198>&#34;trace_start_time: %.*s</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>, time_buf.len, time_buf.data);
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>fprintf</span>(stderr, <span style=color:#2aa198>&#34;filter: vpcid %d &#34;</span>, reader<span style=color:#719e07>-&gt;</span>option.vpcid);
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>tuple_filter_dump</span>(<span style=color:#719e07>&amp;</span>reader<span style=color:#719e07>-&gt;</span>option.tuple, stderr);
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#dc322f>void</span> <span style=color:#268bd2>fill_trace_cache</span>(<span style=color:#719e07>struct</span> trace_reader <span style=color:#719e07>*</span>reader)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>int</span> i;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>for</span> (i <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>; i <span style=color:#719e07>&lt;</span> <span style=color:#2aa198>1</span>; i<span style=color:#719e07>++</span>) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>struct</span> trace_cache <span style=color:#719e07>*</span>c;
+</span></span><span style=display:flex><span>		<span style=color:#dc322f>size_t</span> nr_lost <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>		<span style=color:#dc322f>size_t</span> nr_filtered <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>array_for_each</span>(c, reader<span style=color:#719e07>-&gt;</span>percpu) {
+</span></span><span style=display:flex><span>			<span style=color:#268bd2>trace_cache_fill</span>(c, <span style=color:#719e07>&amp;</span>reader<span style=color:#719e07>-&gt;</span>option);
+</span></span><span style=display:flex><span>			nr_lost <span style=color:#719e07>+=</span> c<span style=color:#719e07>-&gt;</span>nr_lost;
+</span></span><span style=display:flex><span>			nr_filtered <span style=color:#719e07>+=</span> c<span style=color:#719e07>-&gt;</span>nr_filtered;
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>		reader<span style=color:#719e07>-&gt;</span>nr_lost <span style=color:#719e07>=</span> nr_lost;
+</span></span><span style=display:flex><span>		reader<span style=color:#719e07>-&gt;</span>nr_filtered <span style=color:#719e07>=</span> nr_filtered;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>static</span> <span style=color:#719e07>struct</span> trace_cache <span style=color:#719e07>*</span><span style=color:#268bd2>choose_trace_cache</span>(<span style=color:#719e07>struct</span> trace_reader <span style=color:#719e07>*</span>reader)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>uint64_t</span> tsc_min <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> trace_cache <span style=color:#719e07>*</span>tsc_min_c <span style=color:#719e07>=</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> trace_cache <span style=color:#719e07>*</span>c;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> trace_record <span style=color:#719e07>*</span>r;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>array_for_each</span>(c, reader<span style=color:#719e07>-&gt;</span>percpu) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (<span style=color:#268bd2>trace_cache_empty</span>(c))
+</span></span><span style=display:flex><span>			<span style=color:#719e07>continue</span>;
+</span></span><span style=display:flex><span>		r <span style=color:#719e07>=</span> <span style=color:#268bd2>trace_cache_at</span>(c, c<span style=color:#719e07>-&gt;</span>r);
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>tsc_min_c <span style=color:#719e07>||</span> tsc_min <span style=color:#719e07>&gt;</span> r<span style=color:#719e07>-&gt;</span>rx_tsc) {
+</span></span><span style=display:flex><span>			tsc_min_c <span style=color:#719e07>=</span> c;
+</span></span><span style=display:flex><span>			tsc_min <span style=color:#719e07>=</span> r<span style=color:#719e07>-&gt;</span>rx_tsc;
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> tsc_min_c;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#719e07>struct</span> trace_record <span style=color:#719e07>*</span><span style=color:#268bd2>trace_read</span>(<span style=color:#719e07>struct</span> trace_reader <span style=color:#719e07>*</span>reader)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> trace_cache <span style=color:#719e07>*</span>c;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>struct</span> trace_record <span style=color:#719e07>*</span>r;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>static</span> <span style=color:#719e07>struct</span> trace_record rbuf;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (reader<span style=color:#719e07>-&gt;</span>nr_read <span style=color:#719e07>&gt;=</span> reader<span style=color:#719e07>-&gt;</span>option.nr_read_max)
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>exit</span>(<span style=color:#2aa198>1</span>); <span style=color:#586e75>// SIGINT was ignored somewhere unexpectly.
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (reader<span style=color:#719e07>-&gt;</span>option.fp_r) {
+</span></span><span style=display:flex><span>		r <span style=color:#719e07>=</span> <span style=color:#719e07>&amp;</span>rbuf;
+</span></span><span style=display:flex><span>		<span style=color:#719e07>for</span> (;;) {
+</span></span><span style=display:flex><span>			<span style=color:#719e07>if</span> (<span style=color:#268bd2>fread</span>(r, <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>*</span>r), <span style=color:#2aa198>1</span>, reader<span style=color:#719e07>-&gt;</span>option.fp_r) <span style=color:#719e07>!=</span> <span style=color:#2aa198>1</span>) {
+</span></span><span style=display:flex><span>				reader<span style=color:#719e07>-&gt;</span>option.nr_read_max <span style=color:#719e07>=</span> reader<span style=color:#719e07>-&gt;</span>nr_read; <span style=color:#586e75>// to avoid next read.
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span>				(<span style=color:#dc322f>void</span>)<span style=color:#268bd2>raise</span>(SIGINT);
+</span></span><span style=display:flex><span>				<span style=color:#719e07>return</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>			}
+</span></span><span style=display:flex><span>			<span style=color:#719e07>if</span> (<span style=color:#268bd2>match_record</span>(<span style=color:#719e07>&amp;</span>reader<span style=color:#719e07>-&gt;</span>option, r))
+</span></span><span style=display:flex><span>				<span style=color:#719e07>break</span>;
+</span></span><span style=display:flex><span>			reader<span style=color:#719e07>-&gt;</span>nr_filtered<span style=color:#719e07>++</span>;
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>	} <span style=color:#719e07>else</span> {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>fill_trace_cache</span>(reader);
+</span></span><span style=display:flex><span>		c <span style=color:#719e07>=</span> <span style=color:#268bd2>choose_trace_cache</span>(reader);
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>c)
+</span></span><span style=display:flex><span>			<span style=color:#719e07>return</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>		r <span style=color:#719e07>=</span> <span style=color:#268bd2>trace_cache_at</span>(c, c<span style=color:#719e07>-&gt;</span>r<span style=color:#719e07>++</span>);
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (reader<span style=color:#719e07>-&gt;</span>option.fp_w) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (<span style=color:#268bd2>fwrite</span>(r, <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>*</span>r), <span style=color:#2aa198>1</span>, reader<span style=color:#719e07>-&gt;</span>option.fp_w) <span style=color:#719e07>!=</span> <span style=color:#2aa198>1</span>) {
+</span></span><span style=display:flex><span>			<span style=color:#268bd2>fprintf</span>(stderr, <span style=color:#2aa198>&#34;failed to write binary records: %s</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>, <span style=color:#268bd2>strerror</span>(errno));
+</span></span><span style=display:flex><span>			<span style=color:#268bd2>fclose</span>(reader<span style=color:#719e07>-&gt;</span>option.fp_w);
+</span></span><span style=display:flex><span>			reader<span style=color:#719e07>-&gt;</span>option.fp_w <span style=color:#719e07>=</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span>			(<span style=color:#dc322f>void</span>)<span style=color:#268bd2>raise</span>(SIGINT);
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	reader<span style=color:#719e07>-&gt;</span>nr_read<span style=color:#719e07>++</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (reader<span style=color:#719e07>-&gt;</span>nr_read <span style=color:#719e07>==</span> reader<span style=color:#719e07>-&gt;</span>option.nr_read_max) {
+</span></span><span style=display:flex><span>		<span style=color:#719e07>if</span> (reader<span style=color:#719e07>-&gt;</span>option.fp_w)
+</span></span><span style=display:flex><span>			<span style=color:#268bd2>fclose</span>(reader<span style=color:#719e07>-&gt;</span>option.fp_w);
+</span></span><span style=display:flex><span>		(<span style=color:#dc322f>void</span>)<span style=color:#268bd2>raise</span>(SIGINT);
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>return</span> r;
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div></div><footer><p class=meta><span class="byline author vcard">Posted by <span class=fn>windseek</span></span>
+<time>May 27, 2025</time>
+<span class=categories>Tags:
+<a class=category href=https://scottlx.github.io/tags/dpdk>dpdk</a> <a class=category href=https://scottlx.github.io/tags/%e9%ab%98%e6%80%a7%e8%83%bd%e7%bd%91%e7%bb%9c>高性能网络</a></span></p><p class=meta><a class="basic-alignment left" href=https://scottlx.github.io/posts/%E6%B7%B1%E5%85%A5%E5%89%96%E6%9E%90cilium-monitor%E6%9C%BA%E5%88%B6/ title="深入剖析cilium monitor机制">深入剖析cilium monitor机制</a></p><div id=disqus_thread></div><script type=application/javascript>window.disqus_config=function(){},function(){if(["localhost","127.0.0.1"].indexOf(window.location.hostname)!=-1){document.getElementById("disqus_thread").innerHTML="Disqus comments not available by default when the website is previewed locally.";return}var t=document,e=t.createElement("script");e.async=!0,e.src="//scottlx.disqus.com/embed.js",e.setAttribute("data-timestamp",+new Date),(t.head||t.body).appendChild(e)}()</script><noscript>Please enable JavaScript to view the <a href=https://disqus.com/?ref_noscript>comments powered by Disqus.</a></noscript><a href=https://disqus.com class=dsq-brlink>comments powered by <span class=logo-disqus>Disqus</span></a></footer></article></div><aside class="sidebar thirds"><section class="first odd"><h1>Who am I</h1><p><p>云原生网络开发 &ndash;> 高级网管(笑</p><p>golang、云计算、SDN、NFV、软件架构</p><p>记录一些工作上的笔记，主要是以太网数据面开发（包括不限于dpdk，ebpf，ovs，dpvs，vpp&mldr;)以及k8s</p><p>也会记录一些web3方面的学习探索</p></p></section><ul class=sidebar-nav><li class=sidebar-nav-item><a target=_blank rel="noopener noreferrer" href=https://github.com/scottlx title=https://github.com/scottlx><i class="fa fa-github fa-3x"></i></a>
+<a target=_blank rel="noopener noreferrer" href="https://www.facebook.com/profile.php?id=100009824623685" title="https://www.facebook.com/profile.php?id=100009824623685"><i class="fa fa-facebook fa-3x"></i></a></li></ul><section class=odd></section><section class=even><h1>Recent Posts</h1><ul id=recent_posts></ul></section></aside></div></div><footer role=contentinfo><p>Copyright &copy; 2025 windseek - <a href=https://scottlx.github.io/license/>License</a> -
+<span class=credit>Powered by <a target=_blank href=https://gohugo.io rel="noopener noreferrer">Hugo</a> and <a target=_blank href=https://github.com/parsiya/hugo-octopress/ rel="noopener noreferrer">Hugo-Octopress</a> theme.</p></footer></body></html>
