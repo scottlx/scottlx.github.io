@@ -1,0 +1,117 @@
+<!doctype html><html xmlns=http://www.w3.org/1999/xhtml xml:lang=en lang=en-us><head><meta charset=utf-8><meta name=viewport content="width=device-width,minimum-scale=1,maximum-scale=1"><link href=/css/fonts.css rel=stylesheet type=text/css><title>bpftrace注入kfunc</title><link rel=stylesheet href=/css/hugo-octopress.css><link rel=stylesheet href=/css/fork-awesome.min.css><link href=https://scottlx.github.io/favicon.png rel=icon><meta name=description content><meta name=keywords content><meta name=author content="windseek"><meta name=generator content="Hugo 0.119.0"></head><body><header role=banner><hgroup><h1><a href=https://scottlx.github.io/>windseek</a></h1><h2>be curious, be free</h2></hgroup></header><nav role=navigation><fieldset class=mobile-nav><select onchange="location=this.value"><option value>Navigate…</option><option value=https://scottlx.github.io/>» Blog</option><option value=https://scottlx.github.io/archives/>» Archives</option><option value=https://scottlx.github.io/cheatsheet/>» CheatSheet</option><option value=https://scottlx.github.io/about/>» Aboutme</option></select></fieldset><ul class=main-navigation><li><a href=https://scottlx.github.io/ title=Blog>Blog</a></li><li><a href=https://scottlx.github.io/archives/ title=Archives target=_blank rel="noopener noreferrer">Archives</a></li><li><a href=https://scottlx.github.io/cheatsheet/ title=CheatSheet target=_blank rel="noopener noreferrer">CheatSheet</a></li><li><a href=https://scottlx.github.io/about/ title=Aboutme target=_blank rel="noopener noreferrer">Aboutme</a></li></ul><ul class=subscription></ul><form action=https://www.google.com/search method=get target=_blank rel="noopener noreferrer"><fieldset role=search><input class=search type=text name=q results=0 placeholder=Search>
+<input type=hidden name=q value=site:https://scottlx.github.io/></fieldset></form></nav><div id=main><div id=content><div><article class=hentry role=article><header><p class=meta>May 30, 2025
+- 2 minute read
+- <a href=https://scottlx.github.io/posts/bpftrace/#disqus_thread>Comments</a>
+- <a class=label href=https://scottlx.github.io/categories/%e6%8a%80%e6%9c%af%e4%bb%8b%e7%bb%8d/>技术介绍</a></p><h1 class=entry-title>bpftrace注入kfunc</h1></header><div class=entry-content><nav id=TableOfContents><ul><li><ul><li><a href=#四种探针类型>四种探针类型</a></li><li><a href=#btf支持>btf支持</a></li><li><a href=#kfunc-probe>kfunc probe</a></li></ul></li></ul></nav><h3 id=四种探针类型>四种探针类型</h3><h4 id=kprobe><strong>kprobe</strong></h4><ul><li><strong>定义</strong>：动态内核探针，允许在<strong>任意内核函数</strong>的入口（<code>kprobe</code>）或退出（<code>kretprobe</code>）插入断点。</li><li>特点：<ul><li><strong>动态性</strong>：无需修改内核代码，运行时动态注入。</li><li><strong>灵活性</strong>：可跟踪几乎所有内核函数（包括未导出的符号）。</li><li><strong>开销</strong>：较高（需修改指令、处理陷阱），可能影响性能。</li><li><strong>稳定性</strong>：内核函数可能随版本变化，导致跟踪点失效。</li></ul></li><li><strong>用途</strong>：调试、性能分析、动态跟踪未预设的事件。</li></ul><hr><h4 id=kfunc><strong>kfunc</strong></h4><ul><li><strong>定义</strong>：eBPF程序可调用的<strong>内核函数</strong>，由内核显式导出供安全调用。</li><li>特点：<ul><li><strong>安全性</strong>：仅允许调用内核标记为<code>BTF_ID</code>的特定函数（通过BPF Type Format, BTF）。</li><li><strong>性能</strong>：直接调用内核函数，比eBPF Helper更高效。</li><li><strong>依赖eBPF</strong>：需通过eBPF验证器确保安全性。</li></ul></li><li><strong>用途</strong>：允许eBPF程序安全访问内核内部数据结构或功能（如操作链表、修改特定字段）。</li></ul><hr><h4 id=tracepoint><strong>tracepoint</strong></h4><ul><li><strong>定义</strong>：内核静态跟踪点，由开发者<strong>预置在代码中</strong>的稳定事件接口。</li><li>特点：<ul><li><strong>静态性</strong>：需内核开发者预先定义，位置和参数格式固定。</li><li><strong>稳定性</strong>：接口向后兼容，适合生产环境。</li><li><strong>结构化数据</strong>：参数以明确结构体传递（如<code>trace_sched_switch</code>）。</li><li><strong>低开销</strong>：相比kprobe，性能影响较小。</li></ul></li><li><strong>用途</strong>：监控系统调用、调度事件等预定义内核事件。</li></ul><hr><h4 id=-rawtracepoint>** rawtracepoint**</h4><ul><li><strong>定义</strong>：直接访问tracepoint的<strong>原始参数</strong>，跳过内核封装层。</li><li>特点：<ul><li><strong>底层访问</strong>：直接读取寄存器或原始参数，无需解析结构体。</li><li><strong>性能优势</strong>：比常规tracepoint更高效（减少封装开销）。</li><li><strong>不稳定性</strong>：参数格式可能随内核变化，需手动适配。</li><li><strong>依赖eBPF</strong>：常用于eBPF程序（如<code>BPF_PROG_TYPE_RAW_TRACEPOINT</code>类型）。</li></ul></li><li><strong>用途</strong>：需要极致性能的场景（如高频事件跟踪），同时接受潜在兼容性风险。</li></ul><h3 id=btf支持>btf支持</h3><p><a href=https://linuxkernel.org.cn/doc/html/latest/bpf/btf.html target=_blank rel=noopener>BPF 类型格式 (BTF) — Linux 内核文档 - Linux 内核</a></p><p>系统若有btf支持，结构体格式就可以通过btf传给工具，用户无需去查阅内核源码</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-shell data-lang=shell><span style=display:flex><span>sudo bpftrace --info |&amp; grep -i btf
+</span></span></code></pre></div><h3 id=kfunc-probe>kfunc probe</h3><p>调试ebpf代码时，遇到icmp request接收了，但是内核协议栈不返回icmp reply</p><p>下面给出上述问题的排查思路</p><p>查看<code>/proc/net/snmp</code>发现有<strong>InHdrErrors</strong></p><p>或者执行</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-shell data-lang=shell><span style=display:flex><span>netstat -s
+</span></span></code></pre></div><p>发现Ip协议栈有invalid headers的报错</p><p>查看icmp_开头的kfunc点</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-shell data-lang=shell><span style=display:flex><span>bpftrace -lv <span style=color:#2aa198>&#39;kfunc:icmp_*&#39;</span>
+</span></span></code></pre></div><p>输出</p><pre tabindex=0><code>...
+kfunc:icmp_rcv
+    struct sk_buff * skb
+    int retval
+kfunc:icmp_redirect
+    struct sk_buff * skb
+    bool retval
+kfunc:icmp_reply
+    struct icmp_bxm * icmp_param
+    struct sk_buff * skb
+...
+</code></pre><p>查看sock结构体定义</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-shell data-lang=shell><span style=display:flex><span>sudo bpftrace -lv <span style=color:#2aa198>&#39;struct sk_buff&#39;</span>
+</span></span></code></pre></div><p>样例输出</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#719e07>struct</span> sk_buff {
+</span></span><span style=display:flex><span>        <span style=color:#719e07>union</span> {
+</span></span><span style=display:flex><span>                <span style=color:#719e07>struct</span> {
+</span></span><span style=display:flex><span>                        <span style=color:#719e07>struct</span> sk_buff <span style=color:#719e07>*</span>next;
+</span></span><span style=display:flex><span>                        <span style=color:#719e07>struct</span> sk_buff <span style=color:#719e07>*</span>prev;
+</span></span><span style=display:flex><span>                        <span style=color:#719e07>union</span> {
+</span></span><span style=display:flex><span>                                <span style=color:#719e07>struct</span> net_device <span style=color:#719e07>*</span>dev;
+</span></span><span style=display:flex><span>                                <span style=color:#dc322f>long</span> <span style=color:#dc322f>unsigned</span> <span style=color:#dc322f>int</span> dev_scratch;
+</span></span><span style=display:flex><span>                        };
+</span></span><span style=display:flex><span>                };
+</span></span><span style=display:flex><span>                <span style=color:#719e07>struct</span> rb_node rbnode;
+</span></span><span style=display:flex><span>                <span style=color:#719e07>struct</span> list_head list;
+</span></span><span style=display:flex><span>                <span style=color:#719e07>struct</span> llist_node ll_node;
+</span></span><span style=display:flex><span>        };
+</span></span><span style=display:flex><span>        <span style=color:#719e07>union</span> {
+</span></span><span style=display:flex><span>                <span style=color:#719e07>struct</span> sock <span style=color:#719e07>*</span>sk;
+</span></span><span style=display:flex><span>                <span style=color:#dc322f>int</span> ip_defrag_offset;
+</span></span><span style=display:flex><span>        };
+</span></span><span style=display:flex><span>        <span style=color:#719e07>union</span> {
+</span></span><span style=display:flex><span>                <span style=color:#dc322f>ktime_t</span> tstamp;
+</span></span><span style=display:flex><span>                u64 skb_mstamp_ns;
+</span></span><span style=display:flex><span>        };
+</span></span><span style=display:flex><span>        <span style=color:#dc322f>char</span> cb[<span style=color:#2aa198>48</span>];
+</span></span><span style=display:flex><span>        <span style=color:#719e07>union</span> {
+</span></span><span style=display:flex><span>                <span style=color:#719e07>struct</span> {
+</span></span><span style=display:flex><span>                        <span style=color:#dc322f>long</span> <span style=color:#dc322f>unsigned</span> <span style=color:#dc322f>int</span> _skb_refdst;
+</span></span><span style=display:flex><span>                        <span style=color:#dc322f>void</span> (<span style=color:#719e07>*</span>destructor)(<span style=color:#719e07>struct</span> sk_buff <span style=color:#719e07>*</span>);
+</span></span><span style=display:flex><span>                };
+</span></span><span style=display:flex><span>...
+</span></span></code></pre></div><p>查看icmp_rcv是否触发，直接打印skb</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-shell data-lang=shell><span style=display:flex><span>bpftrace -e <span style=color:#2aa198>&#39;kfunc:icmp_rcv{print(*args-&gt;skb)}&#39;</span>
+</span></span></code></pre></div><p>编写打桩脚本，过滤异常报文(ip_header不合法的报文)</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-shell data-lang=shell><span style=display:flex><span>vi ip_rcv_core.bt 
+</span></span></code></pre></div><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#719e07>#include</span> <span style=color:#719e07>&lt;linux/icmp.h&gt;</span><span style=color:#719e07>
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span>
+</span></span><span style=display:flex><span><span style=color:#719e07>#include</span> <span style=color:#719e07>&lt;linux/ip.h&gt;</span><span style=color:#719e07>
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span>
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>kfunc:ip_rcv_core {
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>  $skb <span style=color:#719e07>=</span> (<span style=color:#719e07>struct</span> sk_buff <span style=color:#719e07>*</span>)args<span style=color:#719e07>-&gt;</span>skb;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>  $iph <span style=color:#719e07>=</span> (<span style=color:#719e07>struct</span> iphdr <span style=color:#719e07>*</span>)$skb<span style=color:#719e07>-&gt;</span>data;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span> 
+</span></span><span style=display:flex><span>  <span style=color:#719e07>if</span> ($iph<span style=color:#719e07>-&gt;</span>ihl <span style=color:#719e07>&lt;</span> <span style=color:#2aa198>5</span> <span style=color:#719e07>||</span> $iph<span style=color:#719e07>-&gt;</span>version <span style=color:#719e07>!=</span><span style=color:#2aa198>4</span>) {
+</span></span><span style=display:flex><span>     <span style=color:#268bd2>print</span>(<span style=color:#719e07>*</span>$iph);
+</span></span><span style=display:flex><span>  }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p>执行trace</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-shell data-lang=shell><span style=display:flex><span>bpftrace -e ip_rcv_core.bt
+</span></span></code></pre></div><p>发现有不合法报文，并可以打印出字节，发现是以太头</p><p>最后发现三层tunnel设备的ebpf代码中，如果直接将以太报文redirect给二层设备是不可行的。</p><p>三层tunnel设备需要发送报文给二层设备，需要时raw ip报文才可被正常接收</p><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span><span style=color:#586e75>// 三层tunnel设备redirect给二层设备时，不走二层协议栈，直接进入ip协议栈。
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#719e07>static</span> <span style=color:#719e07>struct</span> sk_buff <span style=color:#719e07>*</span><span style=color:#268bd2>ip_rcv_core</span>(<span style=color:#719e07>struct</span> sk_buff <span style=color:#719e07>*</span>skb, <span style=color:#719e07>struct</span> net <span style=color:#719e07>*</span>net)
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>	<span style=color:#719e07>const</span> <span style=color:#719e07>struct</span> iphdr <span style=color:#719e07>*</span>iph;
+</span></span><span style=display:flex><span>	<span style=color:#dc322f>int</span> drop_reason;
+</span></span><span style=display:flex><span>	u32 len;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#586e75>/* When the interface is in promisc. mode, drop all the crap
+</span></span></span><span style=display:flex><span><span style=color:#586e75>	 * that it receives, do not try to analyse it.
+</span></span></span><span style=display:flex><span><span style=color:#586e75>	 */</span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (skb<span style=color:#719e07>-&gt;</span>pkt_type <span style=color:#719e07>==</span> PACKET_OTHERHOST) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>dev_core_stats_rx_otherhost_dropped_inc</span>(skb<span style=color:#719e07>-&gt;</span>dev);
+</span></span><span style=display:flex><span>		drop_reason <span style=color:#719e07>=</span> SKB_DROP_REASON_OTHERHOST;
+</span></span><span style=display:flex><span>		<span style=color:#719e07>goto</span> drop;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#268bd2>__IP_UPD_PO_STATS</span>(net, IPSTATS_MIB_IN, skb<span style=color:#719e07>-&gt;</span>len);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	skb <span style=color:#719e07>=</span> <span style=color:#268bd2>skb_share_check</span>(skb, GFP_ATOMIC);
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>skb) {
+</span></span><span style=display:flex><span>		<span style=color:#268bd2>__IP_INC_STATS</span>(net, IPSTATS_MIB_INDISCARDS);
+</span></span><span style=display:flex><span>		<span style=color:#719e07>goto</span> out;
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	drop_reason <span style=color:#719e07>=</span> SKB_DROP_REASON_NOT_SPECIFIED;
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span><span style=color:#268bd2>pskb_may_pull</span>(skb, <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> iphdr)))
+</span></span><span style=display:flex><span>		<span style=color:#719e07>goto</span> inhdr_error;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	iph <span style=color:#719e07>=</span> <span style=color:#268bd2>ip_hdr</span>(skb);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#586e75>/*
+</span></span></span><span style=display:flex><span><span style=color:#586e75>	 *	RFC1122: 3.2.1.2 MUST silently discard any IP frame that fails the checksum.
+</span></span></span><span style=display:flex><span><span style=color:#586e75>	 *
+</span></span></span><span style=display:flex><span><span style=color:#586e75>	 *	Is the datagram acceptable?
+</span></span></span><span style=display:flex><span><span style=color:#586e75>	 *
+</span></span></span><span style=display:flex><span><span style=color:#586e75>	 *	1.	Length at least the size of an ip header
+</span></span></span><span style=display:flex><span><span style=color:#586e75>	 *	2.	Version of 4
+</span></span></span><span style=display:flex><span><span style=color:#586e75>	 *	3.	Checksums correctly. [Speed optimisation for later, skip loopback checksums]
+</span></span></span><span style=display:flex><span><span style=color:#586e75>	 *	4.	Doesn&#39;t have a bogus length
+</span></span></span><span style=display:flex><span><span style=color:#586e75>	 */</span>
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#719e07>if</span> (iph<span style=color:#719e07>-&gt;</span>ihl <span style=color:#719e07>&lt;</span> <span style=color:#2aa198>5</span> <span style=color:#719e07>||</span> iph<span style=color:#719e07>-&gt;</span>version <span style=color:#719e07>!=</span> <span style=color:#2aa198>4</span>)
+</span></span><span style=display:flex><span>		<span style=color:#719e07>goto</span> inhdr_error;  <span style=color:#586e75>// 丢包处
+</span></span></span></code></pre></div><blockquote><p>参考</p></blockquote><p><a href=https://bpftrace.org/hol/kernel-probes target=_blank rel=noopener>3. Working with kernel probes | bpftrace</a></p></div><footer><p class=meta><span class="byline author vcard">Posted by <span class=fn>windseek</span></span>
+<time>May 30, 2025</time>
+<span class=categories>Tags:
+<a class=category href=https://scottlx.github.io/tags/ebpf>ebpf</a> <a class=category href=https://scottlx.github.io/tags/linux>linux</a></span></p><p class=meta><a class="basic-alignment left" href=https://scottlx.github.io/posts/cilium-endpoint-%E5%88%9B%E5%BB%BA%E6%B5%81%E7%A8%8B/ title="cilium endpoint 创建流程">cilium endpoint 创建流程</a></p><div id=disqus_thread></div><script type=application/javascript>window.disqus_config=function(){},function(){if(["localhost","127.0.0.1"].indexOf(window.location.hostname)!=-1){document.getElementById("disqus_thread").innerHTML="Disqus comments not available by default when the website is previewed locally.";return}var t=document,e=t.createElement("script");e.async=!0,e.src="//scottlx.disqus.com/embed.js",e.setAttribute("data-timestamp",+new Date),(t.head||t.body).appendChild(e)}()</script><noscript>Please enable JavaScript to view the <a href=https://disqus.com/?ref_noscript>comments powered by Disqus.</a></noscript><a href=https://disqus.com class=dsq-brlink>comments powered by <span class=logo-disqus>Disqus</span></a></footer></article></div><aside class="sidebar thirds"><section class="first odd"><h1>Who am I</h1><p><p>云原生网络开发 &ndash;> 高级网管(笑</p><p>golang、云计算、SDN、NFV、软件架构</p><p>记录一些工作上的笔记，主要是以太网数据面开发（包括不限于dpdk，ebpf，ovs，dpvs，vpp&mldr;)以及k8s</p><p>也会记录一些web3方面的学习探索</p></p></section><ul class=sidebar-nav><li class=sidebar-nav-item><a target=_blank rel="noopener noreferrer" href=https://github.com/scottlx title=https://github.com/scottlx><i class="fa fa-github fa-3x"></i></a>
+<a target=_blank rel="noopener noreferrer" href="https://www.facebook.com/profile.php?id=100009824623685" title="https://www.facebook.com/profile.php?id=100009824623685"><i class="fa fa-facebook fa-3x"></i></a></li></ul><section class=odd></section><section class=even><h1>Recent Posts</h1><ul id=recent_posts></ul></section></aside></div></div><footer role=contentinfo><p>Copyright &copy; 2025 windseek - <a href=https://scottlx.github.io/license/>License</a> -
+<span class=credit>Powered by <a target=_blank href=https://gohugo.io rel="noopener noreferrer">Hugo</a> and <a target=_blank href=https://github.com/parsiya/hugo-octopress/ rel="noopener noreferrer">Hugo-Octopress</a> theme.</p></footer></body></html>
