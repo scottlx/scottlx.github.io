@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>“bitcoin" on windseek</title><link>https://scottlx.github.io/tags/bitcoin/</link><description>Recent content in “bitcoin" on windseek</description><generator>Hugo -- gohugo.io</generator><language>zh-CN</language><lastBuildDate>Fri, 30 May 2025 16:08:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/tags/bitcoin/index.xml" rel="self" type="application/rss+xml"/><item><title>肖臻区块链公开课笔记</title><link>https://scottlx.github.io/posts/%E8%82%96%E8%87%BB%E5%8C%BA%E5%9D%97%E9%93%BE%E7%AC%94%E8%AE%B0/</link><pubDate>Fri, 30 May 2025 16:08:00 +0800</pubDate><guid>https://scottlx.github.io/posts/%E8%82%96%E8%87%BB%E5%8C%BA%E5%9D%97%E9%93%BE%E7%AC%94%E8%AE%B0/</guid><description>密码学原理 主要两个技术：
+哈希 密码学中用到的哈希函数： cryptographic hash function
+需要满足的性质：
+collision（哈希碰撞） resistance $$ x 不等于y，H(x) = H(y) $$ 对一个message求digest（H(m)）
+必定会出现哈希碰撞，没办法篡改内容使得哈希值一样（除非暴力遍历，但是工作量很大）
+md5, 最开始认为collision resistance，但是后面知道如何人为制造哈希碰撞了
+hiding
+没法从哈希值H(x)反推出x
+前提：输入空间足够大，输入空间足够均匀
+与collision resistance结合，实现digital commitment（ditital equavalent of a sealed envelope）
+sealed envelope: 预测股市的结果，但是预测信息不能提前公布（会影响最终的结果），需要放在信封里先封存起来，等到第二天休市了再公布
+将预测结果，哈希完之后公布出去。hiding：不能通过哈希值反推。collision resistance：预测结果不能篡改，改了对不上哈希值
+要求：输入空间要足够大，一般接上随机数，保证输入足够随机且分布均匀，一起做哈希：H(x || nonce)
+puzzle friendly（比特币要求的性质）
+H(x)落在的范围不可预测
+000…0XX…X 事先是不知道哪个输入能算出这种类型的哈希值
+挖矿：找一个nonce，和区块的块头拼在一起，使得哈希值要小于等于某个指定的目标阈值
+H(block header(nonce)) &amp;lt;= target
+这个挖矿的过程没有捷径，所以才可以作为工作量证明proof of work
+一旦有人找到这个nonce，其他人的验证很容易，只要算一次（difficult to solve, easy to verify），设计mining puzzle需要注意这个性质
+SHA-256(比特币的哈希函数)
+secure hash algorithm
+签名 比特币开户：创建公钥私钥对儿（public key, private key），来源于非对称加密体系（asymmetric encryption algorithm）</description></item></channel></rss>
