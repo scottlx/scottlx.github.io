@@ -1,0 +1,1086 @@
+<!doctype html><html xmlns=http://www.w3.org/1999/xhtml xml:lang=en lang=en-us><head><meta charset=utf-8><meta name=viewport content="width=device-width,minimum-scale=1,maximum-scale=1"><link href=/css/fonts.css rel=stylesheet type=text/css><title>nfv化dpvs的cpu fdir</title><link rel=stylesheet href=/css/hugo-octopress.css><link rel=stylesheet href=/css/fork-awesome.min.css><link href=https://scottlx.github.io/favicon.png rel=icon><meta name=description content><meta name=keywords content><meta name=author content="windseek"><meta name=generator content="Hugo 0.119.0"></head><body><header role=banner><hgroup><h1><a href=https://scottlx.github.io/>windseek</a></h1><h2>be curious, be free</h2></hgroup></header><nav role=navigation><fieldset class=mobile-nav><select onchange="location=this.value"><option value>Navigate…</option><option value=https://scottlx.github.io/>» Blog</option><option value=https://scottlx.github.io/archives/>» Archives</option><option value=https://scottlx.github.io/cheatsheet/>» CheatSheet</option><option value=https://scottlx.github.io/about/>» Aboutme</option></select></fieldset><ul class=main-navigation><li><a href=https://scottlx.github.io/ title=Blog>Blog</a></li><li><a href=https://scottlx.github.io/archives/ title=Archives target=_blank rel="noopener noreferrer">Archives</a></li><li><a href=https://scottlx.github.io/cheatsheet/ title=CheatSheet target=_blank rel="noopener noreferrer">CheatSheet</a></li><li><a href=https://scottlx.github.io/about/ title=Aboutme target=_blank rel="noopener noreferrer">Aboutme</a></li></ul><ul class=subscription></ul><form action=https://www.google.com/search method=get target=_blank rel="noopener noreferrer"><fieldset role=search><input class=search type=text name=q results=0 placeholder=Search>
+<input type=hidden name=q value=site:https://scottlx.github.io/></fieldset></form></nav><div id=main><div id=content><div><article class=hentry role=article><header><p class=meta>May 30, 2025
+- 18 minute read
+- <a href=https://scottlx.github.io/posts/nfv%E5%8C%96dpvs%E7%9A%84cpu-fdir/#disqus_thread>Comments</a>
+- <a class=label href=https://scottlx.github.io/categories/%e6%8a%80%e6%9c%af%e4%bb%8b%e7%bb%8d/>技术介绍</a></p><h1 class=entry-title><a href=https://scottlx.github.io/posts/nfv%E5%8C%96dpvs%E7%9A%84cpu-fdir/>nfv化dpvs的cpu fdir</a></h1></header><div class=entry-content><nav id=TableOfContents><ul><li><ul><li></li></ul></li></ul></nav><h4 id=数据亲和性>数据亲和性</h4><p>如图所示，dpvs 机器有两块网卡，nic1 是 wan 外网网卡, nic0 是 lan 内网网卡。 当 client 发送 packet 时，网卡一般由 rss 来选择数据发送到哪个队列，一般这个队列都会绑定到某个核心 lcore.。rss 一般根据四元组&lt;dport, dip, sport, sip>来分配网卡队列。但是，当 packet 由 rs 返回 dpvs 时，如果还是根据四元组来做 rss, 那么得到的队列必然无法对应到正确的 lcore. 这就会引起流表数据 miss, 如果再从其它 lcore 查表，必然会引起共享数据加锁，和 cpu cache 失效问题。</p><p><img src=D:%5CUsers%5Clinxun2%5CDesktop%5Cdpvs%E4%BA%B2%E5%92%8C%E6%80%A7.webp alt=dpvs亲和性></p><p>dpvs提出的解决方案是flow director（fdir）。当server回包数据进入网卡后不再采用四元组+rss去计算队列，而是根据数据的dport将数据精确分配到预定队列。如下图所示，本地可用端口，根据 cpu 个数做掩码。将端口固定到某个 lcore。举个例子，如果网卡有 16 个队列，那么就配置 16 个 cpu, 掩码是 0x0F, 端口根据掩码取余，就会对应到指定的队列和cpu。</p><p>dpvs在新建一条conn时会从lcore所关联的port池里选择sport，从而实现了同一对数据包被同一个lcore处理。</p><p><img src=D:%5CUsers%5Clinxun2%5CDesktop%5Cdpvs_fdir.webp alt=dpvs_fdir></p><p>实际上，fdir是dpdk提供的api，支持多层协议堆叠的flow规则配置，用户可以基于proto、ip、port等信息随意定制自己的flow。根据硬件选型，lb物理机所采用的网卡是NVIDIA Mellanox ConnectX-6，支持L2-L4的fdir规则定制，因此lb的fdir规则考虑采用geneve封装的outer ip 作为flow的匹配条件，因为我们的lip是per core的，实现便捷，同时可以避免端口抢占。</p><p>检查网卡是否支持fdir：http://doc.dpdk.org/guides/nics/overview.html#id1</p><h4 id=nfv化问题>nfv化问题</h4><p>对于云上虚拟机 virtio 等没有硬件卸载能力，但有用户态网卡驱动的网卡，需要通过软件来实现上述fdir功能</p><h5 id=基本思路>基本思路</h5><p>在<code>netif_deliver_mbuf</code>处，也就是进入dpvs单核处理流程之前，进行一次cpu导流。</p><p>cpu两两之间预先分配好导流用的ring buffer，报文经过parser解析后，根据规则进行精确匹配。若匹配到fidr规则，则按照规则指定的cid转移报文到指定的cpu ring buffer</p><p>lcore job增加一个处理fdir ring的job ：lcore_process_fdir_ring`（类似process_arp_ring）
+<img src=/img/dpvs/cpu_fdir.png alt=cpu_fdir></p><h5 id=patch>patch</h5><div class=highlight><pre tabindex=0 style=color:#93a1a1;background-color:#002b36;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span>diff <span style=color:#719e07>--</span>git a<span style=color:#719e07>/</span>config.mk b<span style=color:#719e07>/</span>config.mk
+</span></span><span style=display:flex><span>index <span style=color:#2aa198>91673</span>dc93aff8fc47bcde6f275c439b44c5b8ef8..ff98d5c997a9207feb4e73e3e9ad899e9f28f090 <span style=color:#2aa198>100644</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>---</span> a<span style=color:#719e07>/</span>config.mk
+</span></span><span style=display:flex><span><span style=color:#719e07>+++</span> b<span style=color:#719e07>/</span>config.mk
+</span></span><span style=display:flex><span>@@ <span style=color:#719e07>-</span><span style=color:#2aa198>10</span>,<span style=color:#2aa198>7</span> <span style=color:#719e07>+</span><span style=color:#2aa198>10</span>,<span style=color:#2aa198>7</span> @@ export CONFIG_PDUMP<span style=color:#719e07>=</span>y
+</span></span><span style=display:flex><span> export CONFIG_ICMP_REDIRECT_CORE<span style=color:#719e07>=</span>n
+</span></span><span style=display:flex><span> 
+</span></span><span style=display:flex><span> <span style=color:#719e07># debugging and logging
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span><span style=color:#719e07>-</span>export CONFIG_DEBUG<span style=color:#719e07>=</span>n
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>export CONFIG_DEBUG<span style=color:#719e07>=</span>y
+</span></span><span style=display:flex><span> export CONFIG_DPVS_NEIGH_DEBUG<span style=color:#719e07>=</span>n
+</span></span><span style=display:flex><span> export CONFIG_RECORD_BIG_LOOP<span style=color:#719e07>=</span>n
+</span></span><span style=display:flex><span> export CONFIG_DPVS_SAPOOL_DEBUG<span style=color:#719e07>=</span>n
+</span></span><span style=display:flex><span>diff <span style=color:#719e07>--</span>git a<span style=color:#719e07>/</span>include<span style=color:#719e07>/</span>conf<span style=color:#719e07>/</span>cpu_fdir.h b<span style=color:#719e07>/</span>include<span style=color:#719e07>/</span>conf<span style=color:#719e07>/</span>cpu_fdir.h
+</span></span><span style=display:flex><span>new file mode <span style=color:#2aa198>100644</span>
+</span></span><span style=display:flex><span>index <span style=color:#2aa198>0000000000000000000000000000000000000000..2</span>bd26dd5880aa740c1290b3f095b02bf6761f890
+</span></span><span style=display:flex><span><span style=color:#719e07>---</span> <span style=color:#719e07>/</span>dev<span style=color:#719e07>/</span>null
+</span></span><span style=display:flex><span><span style=color:#719e07>+++</span> b<span style=color:#719e07>/</span>include<span style=color:#719e07>/</span>conf<span style=color:#719e07>/</span>cpu_fdir.h
+</span></span><span style=display:flex><span>@@ <span style=color:#719e07>-</span><span style=color:#2aa198>0</span>,<span style=color:#2aa198>0</span> <span style=color:#719e07>+</span><span style=color:#2aa198>1</span>,<span style=color:#2aa198>22</span> @@
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#ifndef __CPU_FDIR_CONF_H__
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#define __CPU_FDIR_CONF_H__
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#include <span style=color:#2aa198>&#34;conf/sockopts.h&#34;</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>struct</span> cpu_fdir_conf {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>uint8_t</span>              proto;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>uint8_t</span>              cid;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>uint32_t</span>             daddr;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>uint8_t</span>              d_plen;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>uint16_t</span>             dport_from;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>uint16_t</span>             dport_to;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}<span style=color:#268bd2>__attribute__</span>((__packed__));
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>struct</span> cpu_fdir_conf_array {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>int</span>                    nrule;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>struct</span> cpu_fdir_conf   rules[<span style=color:#2aa198>0</span>];
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>} <span style=color:#268bd2>__attribute__</span>((__packed__));
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#endif
+</span></span><span style=display:flex><span>\ No newline at end of file
+</span></span><span style=display:flex><span>diff <span style=color:#719e07>--</span>git a<span style=color:#719e07>/</span>include<span style=color:#719e07>/</span>conf<span style=color:#719e07>/</span>sockopts.h b<span style=color:#719e07>/</span>include<span style=color:#719e07>/</span>conf<span style=color:#719e07>/</span>sockopts.h
+</span></span><span style=display:flex><span>index <span style=color:#2aa198>2e3</span>cd75950c4939a3c1e3f143fcfd26306dcfcbb.<span style=color:#2aa198>.9e0</span>bf0d764c973341c24a04ac6f5858ce094efc8 <span style=color:#2aa198>100644</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>---</span> a<span style=color:#719e07>/</span>include<span style=color:#719e07>/</span>conf<span style=color:#719e07>/</span>sockopts.h
+</span></span><span style=display:flex><span><span style=color:#719e07>+++</span> b<span style=color:#719e07>/</span>include<span style=color:#719e07>/</span>conf<span style=color:#719e07>/</span>sockopts.h
+</span></span><span style=display:flex><span>@@ <span style=color:#719e07>-</span><span style=color:#2aa198>149</span>,<span style=color:#2aa198>6</span> <span style=color:#719e07>+</span><span style=color:#2aa198>149</span>,<span style=color:#2aa198>10</span> @@
+</span></span><span style=display:flex><span>     <span style=color:#268bd2>DPVSMSG</span>(SOCKOPT_SET_IFTRAF_ADD) \
+</span></span><span style=display:flex><span>     <span style=color:#268bd2>DPVSMSG</span>(SOCKOPT_SET_IFTRAF_DEL) \
+</span></span><span style=display:flex><span>     <span style=color:#268bd2>DPVSMSG</span>(SOCKOPT_GET_IFTRAF_SHOW)\
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    \
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#268bd2>DPVSMSG</span>(SOCKOPT_SET_FDIR_ADD)  \
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#268bd2>DPVSMSG</span>(SOCKOPT_SET_FDIR_DEL)  \
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#268bd2>DPVSMSG</span>(SOCKOPT_GET_FDIR_SHOW) \
+</span></span><span style=display:flex><span> 
+</span></span><span style=display:flex><span> <span style=color:#719e07>typedef</span> <span style=color:#719e07>enum</span> {
+</span></span><span style=display:flex><span>     <span style=color:#268bd2>DPVSMSG_SOCKOPT_ENUM</span>(ENUM_ITEM)
+</span></span><span style=display:flex><span>diff <span style=color:#719e07>--</span>git a<span style=color:#719e07>/</span>include<span style=color:#719e07>/</span>fdir<span style=color:#719e07>/</span>cpu_fdir.h b<span style=color:#719e07>/</span>include<span style=color:#719e07>/</span>fdir<span style=color:#719e07>/</span>cpu_fdir.h
+</span></span><span style=display:flex><span>new file mode <span style=color:#2aa198>100644</span>
+</span></span><span style=display:flex><span>index <span style=color:#2aa198>0000000000000000000000000000000000000000..71f</span><span style=color:#2aa198>780</span>efe6910b5d91f43e5cb2fdb491dda4966d
+</span></span><span style=display:flex><span><span style=color:#719e07>---</span> <span style=color:#719e07>/</span>dev<span style=color:#719e07>/</span>null
+</span></span><span style=display:flex><span><span style=color:#719e07>+++</span> b<span style=color:#719e07>/</span>include<span style=color:#719e07>/</span>fdir<span style=color:#719e07>/</span>cpu_fdir.h
+</span></span><span style=display:flex><span>@@ <span style=color:#719e07>-</span><span style=color:#2aa198>0</span>,<span style=color:#2aa198>0</span> <span style=color:#719e07>+</span><span style=color:#2aa198>1</span>,<span style=color:#2aa198>29</span> @@
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#ifndef __CPU_FDIR_H__
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#define __CPU_FDIR_H__
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#include <span style=color:#2aa198>&#34;conf/common.h&#34;</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#include <span style=color:#2aa198>&#34;netif.h&#34;</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#include <span style=color:#2aa198>&#34;list.h&#34;</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#include <span style=color:#2aa198>&#34;dpdk.h&#34;</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>struct</span> cpu_fdir {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>struct</span> list_head     list;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>uint8_t</span>              proto;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>lcoreid_t</span>            cid;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#586e75>// only support inner header for now
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#719e07>+</span>    <span style=color:#dc322f>rte_be32_t</span>           daddr;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>rte_be32_t</span>           daddr_mask;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>uint16_t</span>             dport_from;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>uint16_t</span>             dport_to;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>} __rte_cache_aligned;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>struct</span> cpu_fdir <span style=color:#719e07>*</span><span style=color:#268bd2>cpu_fdir_alloc</span>(<span style=color:#dc322f>void</span>);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>struct</span> cpu_fdir <span style=color:#719e07>*</span><span style=color:#268bd2>cpu_fdir_get</span>(<span style=color:#dc322f>uint8_t</span> proto, <span style=color:#dc322f>rte_be32_t</span> saddr, <span style=color:#dc322f>rte_be32_t</span> daddr,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>uint16_t</span> sport, <span style=color:#dc322f>uint16_t</span> dport);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#dc322f>int</span> <span style=color:#268bd2>cpu_fdir_pkt</span>(<span style=color:#719e07>struct</span> rte_mbuf <span style=color:#719e07>*</span>mbuf, <span style=color:#dc322f>lcoreid_t</span> peer_cid);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#dc322f>void</span> <span style=color:#268bd2>cpu_fdir_ring_proc</span>(<span style=color:#dc322f>lcoreid_t</span> cid);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#dc322f>int</span> <span style=color:#268bd2>cpu_fdir_redirect</span>(<span style=color:#719e07>struct</span> rte_mbuf <span style=color:#719e07>*</span>mbuf, <span style=color:#dc322f>int</span> <span style=color:#719e07>*</span>redirected);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#dc322f>int</span> <span style=color:#268bd2>cpu_fdir_init</span>(<span style=color:#dc322f>void</span>);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#dc322f>int</span> <span style=color:#268bd2>cpu_fdir_term</span>(<span style=color:#dc322f>void</span>);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#endif <span style=color:#586e75>/* __CPU_FDIR_H__ */</span>
+</span></span><span style=display:flex><span>\ No newline at end of file
+</span></span><span style=display:flex><span>diff <span style=color:#719e07>--</span>git a<span style=color:#719e07>/</span>include<span style=color:#719e07>/</span>fdir<span style=color:#719e07>/</span>parser.h b<span style=color:#719e07>/</span>include<span style=color:#719e07>/</span>fdir<span style=color:#719e07>/</span>parser.h
+</span></span><span style=display:flex><span>new file mode <span style=color:#2aa198>100644</span>
+</span></span><span style=display:flex><span>index <span style=color:#2aa198>0000000000000000000000000000000000000000.</span>.f793d952293ee8ca5790c90c509d8464d8a8155a
+</span></span><span style=display:flex><span><span style=color:#719e07>---</span> <span style=color:#719e07>/</span>dev<span style=color:#719e07>/</span>null
+</span></span><span style=display:flex><span><span style=color:#719e07>+++</span> b<span style=color:#719e07>/</span>include<span style=color:#719e07>/</span>fdir<span style=color:#719e07>/</span>parser.h
+</span></span><span style=display:flex><span>@@ <span style=color:#719e07>-</span><span style=color:#2aa198>0</span>,<span style=color:#2aa198>0</span> <span style=color:#719e07>+</span><span style=color:#2aa198>1</span>,<span style=color:#2aa198>97</span> @@
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#ifndef __FDIR_PARSER_H__
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#define __FDIR_PARSER_H__
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#include <span style=color:#2aa198>&#34;conf/common.h&#34;</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#include <span style=color:#719e07>&lt;</span>rte_mbuf.h<span style=color:#719e07>&gt;</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#include <span style=color:#2aa198>&#34;netif.h&#34;</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#include <span style=color:#2aa198>&#34;dpdk.h&#34;</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#include <span style=color:#2aa198>&#34;rte_geneve.h&#34;</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#include <span style=color:#2aa198>&#34;rte_vxlan.h&#34;</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>enum</span> {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    TUNNEL_NONE,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	TUNNEL_VXLAN,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	TUNNEL_GENEVE,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>};
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#<span style=color:#719e07>if</span> RTE_BYTE_ORDER <span style=color:#719e07>==</span> RTE_LITTLE_ENDIAN
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#define <span style=color:#268bd2>_htons</span>(x) ((<span style=color:#dc322f>uint16_t</span>)((((x) <span style=color:#719e07>&amp;</span> <span style=color:#2aa198>0x00ffU</span>) <span style=color:#719e07>&lt;&lt;</span> <span style=color:#2aa198>8</span>) <span style=color:#719e07>|</span> (((x) <span style=color:#719e07>&amp;</span> <span style=color:#2aa198>0xff00U</span>) <span style=color:#719e07>&gt;&gt;</span> <span style=color:#2aa198>8</span>)))
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#<span style=color:#719e07>else</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#define <span style=color:#268bd2>_htons</span>(x) (x)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#endif
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#586e75>// common parser and segment lib
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#719e07>+</span><span style=color:#719e07>typedef</span> <span style=color:#719e07>struct</span> sk_buff_info {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#719e07>struct</span> rte_mbuf<span style=color:#719e07>*</span>    mbuf;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#586e75>/* Pointer to start of data.
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+	 * Note this is different from mbuf.buf_addr.
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+	 * head = (void *)skb + sizeof(*skb)
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+	 * mbuf.buf_addr = (void *)skb + sizeof(mbuf)
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+	 */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#719e07>union</span> {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	    <span style=color:#719e07>struct</span> rte_ether_hdr    <span style=color:#719e07>*</span>outer_eth; 
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	    <span style=color:#dc322f>void</span>    <span style=color:#719e07>*</span>outer_l2_hdr;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	}; <span style=color:#586e75>/* ether header, or NULL if not set */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#719e07>union</span> {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#719e07>struct</span> rte_ipv4_hdr    <span style=color:#719e07>*</span>outer_iph;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#719e07>struct</span> rte_arp_hdr    <span style=color:#719e07>*</span>outer_arph;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#dc322f>void</span>    <span style=color:#719e07>*</span>outer_l3_hdr;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	}; <span style=color:#586e75>/*inner ip/arp header, or NULL if not set */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#719e07>union</span> {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#719e07>struct</span> rte_tcp_hdr    <span style=color:#719e07>*</span>outer_tcph;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#719e07>struct</span> rte_udp_hdr    <span style=color:#719e07>*</span>outer_udph;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#719e07>struct</span> rte_icmp_hdr    <span style=color:#719e07>*</span>outer_icmph;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#dc322f>void</span>    <span style=color:#719e07>*</span>outer_l4_hdr;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	}; <span style=color:#586e75>/* inner_tcp/udp/icmp header, or NULL if not set */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#719e07>union</span> {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	    <span style=color:#719e07>struct</span> rte_ether_hdr    <span style=color:#719e07>*</span>eth; <span style=color:#586e75>// vlan = eth + 1 if exist
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#719e07>+</span>		<span style=color:#dc322f>void</span>    <span style=color:#719e07>*</span>l2_hdr;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	}; <span style=color:#586e75>/* ether header, or NULL if not set */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#719e07>union</span> {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#719e07>struct</span> rte_ipv6_hdr    <span style=color:#719e07>*</span>ip6h;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#719e07>struct</span> rte_ipv4_hdr    <span style=color:#719e07>*</span>iph;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#719e07>struct</span> rte_arp_hdr    <span style=color:#719e07>*</span>arph;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#dc322f>void</span>    <span style=color:#719e07>*</span>l3_hdr;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	}; <span style=color:#586e75>/* ip/arp header, or NULL if not set */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#719e07>union</span> {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#719e07>struct</span> rte_tcp_hdr    <span style=color:#719e07>*</span>tcph;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#719e07>struct</span> rte_udp_hdr    <span style=color:#719e07>*</span>udph;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#719e07>struct</span> rte_icmp_hdr    <span style=color:#719e07>*</span>icmph;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#dc322f>void</span>    <span style=color:#719e07>*</span>l4_hdr;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	}; <span style=color:#586e75>/* tcp/udp/icmp header, or NULL if not set */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#719e07>union</span> {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#719e07>struct</span> rte_vxlan_hdr    <span style=color:#719e07>*</span>vxlanh;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#719e07>struct</span> rte_geneve_hdr    <span style=color:#719e07>*</span>genh;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#dc322f>void</span>    <span style=color:#719e07>*</span>tunnel_hdr;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	}; <span style=color:#586e75>/* vxlan/geneve header, or NULL if not set */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#dc322f>uint32_t</span> recv_vni;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#dc322f>uint8_t</span> vni_flag;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#dc322f>uint16_t</span> outer_l2_len;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#dc322f>uint16_t</span> outer_l3_len;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#dc322f>uint16_t</span> outer_l4_len;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>uint8_t</span>  tunnel_type;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#dc322f>uint8_t</span>  tunnel_flag;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>uint16_t</span>  tunnel_len;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#dc322f>uint16_t</span> l2_len;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#dc322f>uint16_t</span> l3_len;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#dc322f>uint16_t</span> l4_len;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#dc322f>uint8_t</span> outer_ethertype;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#dc322f>uint8_t</span> ethertype;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#dc322f>uint8_t</span> outer_l4_proto;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#dc322f>uint8_t</span> l4_proto;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#dc322f>uint8_t</span> is_tunnel;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>} <span style=color:#dc322f>pkt_info_t</span> __rte_cache_aligned;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#dc322f>void</span> <span style=color:#268bd2>pkt_info_init</span>(<span style=color:#dc322f>pkt_info_t</span><span style=color:#719e07>*</span> pkt_info, <span style=color:#719e07>struct</span> rte_mbuf<span style=color:#719e07>*</span> mbuf);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#endif
+</span></span><span style=display:flex><span>\ No newline at end of file
+</span></span><span style=display:flex><span>diff <span style=color:#719e07>--</span>git a<span style=color:#719e07>/</span>src<span style=color:#719e07>/</span>fdir<span style=color:#719e07>/</span>cpu_fdir.c b<span style=color:#719e07>/</span>src<span style=color:#719e07>/</span>fdir<span style=color:#719e07>/</span>cpu_fdir.c
+</span></span><span style=display:flex><span>new file mode <span style=color:#2aa198>100644</span>
+</span></span><span style=display:flex><span>index <span style=color:#2aa198>0000000000000000000000000000000000000000..3</span>aef18a13dccb652210b8bad8de96b1c4e32c0c0
+</span></span><span style=display:flex><span><span style=color:#719e07>---</span> <span style=color:#719e07>/</span>dev<span style=color:#719e07>/</span>null
+</span></span><span style=display:flex><span><span style=color:#719e07>+++</span> b<span style=color:#719e07>/</span>src<span style=color:#719e07>/</span>fdir<span style=color:#719e07>/</span>cpu_fdir.c
+</span></span><span style=display:flex><span>@@ <span style=color:#719e07>-</span><span style=color:#2aa198>0</span>,<span style=color:#2aa198>0</span> <span style=color:#719e07>+</span><span style=color:#2aa198>1</span>,<span style=color:#2aa198>468</span> @@
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#include <span style=color:#2aa198>&#34;fdir/cpu_fdir.h&#34;</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#include <span style=color:#2aa198>&#34;fdir/parser.h&#34;</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#include <span style=color:#2aa198>&#34;conf/cpu_fdir.h&#34;</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#include <span style=color:#2aa198>&#34;ctrl.h&#34;</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#define CPU_FDIR_RING_SIZE  <span style=color:#2aa198>2048</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#define CPU_FDIR_TBL_BITS   <span style=color:#2aa198>10</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#define <span style=color:#268bd2>CPU_FDIR_TBL_SIZE</span>   (<span style=color:#2aa198>1</span> <span style=color:#719e07>&lt;&lt;</span> CPU_FDIR_TBL_BITS)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#define <span style=color:#268bd2>CPU_FDIR_TBL_MASK</span>   (CPU_FDIR_TBL_SIZE <span style=color:#719e07>-</span> <span style=color:#2aa198>1</span>)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#719e07>struct</span> list_head   <span style=color:#719e07>*</span>g_cpu_fdir_tbl;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#dc322f>rte_spinlock_t</span>      cpu_fdir_tbl_lock[DPVS_MAX_SOCKET];
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#719e07>struct</span> rte_mempool <span style=color:#719e07>*</span>g_cpu_fdir_cache[DPVS_MAX_SOCKET];
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#dc322f>rte_atomic32_t</span> num_fdir_rules[DPVS_MAX_SOCKET];
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#define <span style=color:#268bd2>this_cpu_fdir_cache</span>      (g_cpu_fdir_cache[<span style=color:#268bd2>rte_socket_id</span>()])
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#define <span style=color:#268bd2>this_num_fdir_rules</span>      (num_fdir_rules[<span style=color:#268bd2>rte_socket_id</span>()])
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#719e07>struct</span> rte_ring    <span style=color:#719e07>*</span>cpu_fdir_ring[DPVS_MAX_LCORE][DPVS_MAX_LCORE];
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#dc322f>bool</span> cpu_fdir_enable <span style=color:#719e07>=</span> <span style=color:#b58900>true</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#define CPU_FDIR
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#define RTE_LOGTYPE_CPU_FDIR    RTE_LOGTYPE_USER1
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#ifdef CONFIG_DPVS_IPVS_DEBUG
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#268bd2>inline</span> <span style=color:#dc322f>void</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#268bd2>cpu_fdir_show</span>(<span style=color:#719e07>struct</span> cpu_fdir <span style=color:#719e07>*</span>r, <span style=color:#719e07>const</span> <span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>action)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>char</span> sbuf[<span style=color:#2aa198>64</span>], dbuf[<span style=color:#2aa198>64</span>];
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>char</span> sbufm[<span style=color:#2aa198>64</span>], dbufm[<span style=color:#2aa198>64</span>];
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#268bd2>RTE_LOG</span>(DEBUG, CPU_FDIR, <span style=color:#2aa198>&#34;[%d] redirect %s: [%d] %s %s/%s:%d-%d -&gt; %s/%s:%d-%d</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#268bd2>rte_lcore_id</span>(), action, r<span style=color:#719e07>-&gt;</span>cid,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#268bd2>inet_proto_name</span>(r<span style=color:#719e07>-&gt;</span>proto),
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#268bd2>inet_ntop</span>(r<span style=color:#719e07>-&gt;</span>af, <span style=color:#719e07>&amp;</span>r<span style=color:#719e07>-&gt;</span>saddr, sbuf, <span style=color:#719e07>sizeof</span>(sbuf)) <span style=color:#719e07>?</span> sbuf : <span style=color:#2aa198>&#34;::&#34;</span>,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#268bd2>inet_ntop</span>(r<span style=color:#719e07>-&gt;</span>af, <span style=color:#719e07>&amp;</span>r<span style=color:#719e07>-&gt;</span>saddr_mask, sbufm, <span style=color:#719e07>sizeof</span>(sbufm)) <span style=color:#719e07>?</span> sbufm : <span style=color:#2aa198>&#34;::&#34;</span>,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#268bd2>ntohs</span>(r<span style=color:#719e07>-&gt;</span>sport_from),
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#268bd2>ntohs</span>(r<span style=color:#719e07>-&gt;</span>sport_to),
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#268bd2>inet_ntop</span>(r<span style=color:#719e07>-&gt;</span>af, <span style=color:#719e07>&amp;</span>r<span style=color:#719e07>-&gt;</span>daddr, dbuf, <span style=color:#719e07>sizeof</span>(dbuf)) <span style=color:#719e07>?</span> dbuf : <span style=color:#2aa198>&#34;::&#34;</span>,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#268bd2>inet_ntop</span>(r<span style=color:#719e07>-&gt;</span>af, <span style=color:#719e07>&amp;</span>r<span style=color:#719e07>-&gt;</span>daddr_mask, dbufm, <span style=color:#719e07>sizeof</span>(dbufm)) <span style=color:#719e07>?</span> dbufm : <span style=color:#2aa198>&#34;::&#34;</span>,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#268bd2>ntohs</span>(r<span style=color:#719e07>-&gt;</span>dport_from),
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#268bd2>ntohs</span>(r<span style=color:#719e07>-&gt;</span>dport_to));
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#endif
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#586e75>/**
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+ * try lookup this_cpu_fdir_tbl by packet inner header tuple
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+ *
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+ *  &lt;proto, saddr, sport, daddr, dport&gt;.
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+ *
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+ * return r if found or NULL if not exist.
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+ */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>struct</span> cpu_fdir <span style=color:#719e07>*</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#268bd2>cpu_fdir_get</span>(<span style=color:#dc322f>uint8_t</span> proto, <span style=color:#dc322f>rte_be32_t</span> saddr, <span style=color:#dc322f>rte_be32_t</span> daddr,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>uint16_t</span> sport, <span style=color:#dc322f>uint16_t</span> dport)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>struct</span> cpu_fdir <span style=color:#719e07>*</span>r;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>cpu_fdir_enable) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>return</span> EDPVS_OK;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#586e75>// only match first rule in list
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#719e07>+</span>    <span style=color:#268bd2>list_for_each_entry</span>(r, <span style=color:#719e07>&amp;</span>g_cpu_fdir_tbl[<span style=color:#268bd2>rte_socket_id</span>()], list) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>if</span> ( r<span style=color:#719e07>-&gt;</span>proto <span style=color:#719e07>==</span> proto
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#719e07>&amp;&amp;</span> (dport <span style=color:#719e07>&gt;=</span> r<span style=color:#719e07>-&gt;</span>dport_from <span style=color:#719e07>&amp;&amp;</span> dport <span style=color:#719e07>&lt;=</span> r<span style=color:#719e07>-&gt;</span>dport_to)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#719e07>&amp;&amp;</span> ((r<span style=color:#719e07>-&gt;</span>daddr_mask <span style=color:#719e07>&amp;</span> daddr) <span style=color:#719e07>==</span> r<span style=color:#719e07>-&gt;</span>daddr)) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#719e07>goto</span> found;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>return</span> <span style=color:#b58900>NULL</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>found:
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#ifdef CONFIG_DPVS_IPVS_DEBUG
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#268bd2>cpu_fdir_show</span>(r, <span style=color:#2aa198>&#34;get&#34;</span>);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#endif
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>return</span> r;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#586e75>/**
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+ * Forward the packet to the found redirect owner core.
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+ */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#dc322f>int</span> <span style=color:#268bd2>cpu_fdir_redirect_pkt</span>(<span style=color:#719e07>struct</span> rte_mbuf <span style=color:#719e07>*</span>mbuf, <span style=color:#dc322f>lcoreid_t</span> peer_cid)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>lcoreid_t</span> cid <span style=color:#719e07>=</span> <span style=color:#268bd2>rte_lcore_id</span>();
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>int</span> ret;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    ret <span style=color:#719e07>=</span> <span style=color:#268bd2>rte_ring_enqueue</span>(cpu_fdir_ring[peer_cid][cid], mbuf);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>if</span> (ret <span style=color:#719e07>&lt;</span> <span style=color:#2aa198>0</span>) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#268bd2>RTE_LOG</span>(ERR, CPU_FDIR,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                <span style=color:#2aa198>&#34;%s: [%d] failed to enqueue mbuf to cpu_fdir_ring[%d][%d]</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                __func__, cid, peer_cid, cid);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>return</span> INET_DROP;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#ifdef CONFIG_DPVS_IPVS_DEBUG
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#268bd2>RTE_LOG</span>(DEBUG, CPU_FDIR,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#2aa198>&#34;%s: [%d] enqueued mbuf to cpu_fdir_ring[%d][%d]</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            __func__, cid, peer_cid, cid);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#endif
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>return</span> INET_STOLEN;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#dc322f>int</span> <span style=color:#268bd2>cpu_fdir_redirect</span>(<span style=color:#719e07>struct</span> rte_mbuf <span style=color:#719e07>*</span>mbuf, <span style=color:#dc322f>int</span> <span style=color:#719e07>*</span>redirected) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>pkt_info_t</span> pkt_info;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#268bd2>pkt_info_init</span>(<span style=color:#719e07>&amp;</span>pkt_info, mbuf);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#586e75>// always use inner headers for fdir
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#719e07>+</span>    <span style=color:#719e07>struct</span> rte_ipv4_hdr <span style=color:#719e07>*</span>iph <span style=color:#719e07>=</span> pkt_info.iph;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>iph) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>return</span> EDPVS_INVPKT;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>uint16_t</span> sport, dport <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>switch</span> (pkt_info.l4_proto)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>case</span> IPPROTO_TCP:
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        sport <span style=color:#719e07>=</span> pkt_info.tcph<span style=color:#719e07>-&gt;</span>src_port;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        dport <span style=color:#719e07>=</span> pkt_info.tcph<span style=color:#719e07>-&gt;</span>dst_port;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>break</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>case</span> IPPROTO_UDP:
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        sport <span style=color:#719e07>=</span> pkt_info.udph<span style=color:#719e07>-&gt;</span>src_port;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        dport <span style=color:#719e07>=</span> pkt_info.udph<span style=color:#719e07>-&gt;</span>dst_port;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>break</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>case</span> IPPROTO_ICMP:
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        sport <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        dport <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>default</span><span style=color:#719e07>:</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>return</span> EDPVS_INVPKT;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>struct</span> cpu_fdir <span style=color:#719e07>*</span>r <span style=color:#719e07>=</span> <span style=color:#268bd2>cpu_fdir_get</span>(pkt_info.l4_proto, 
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        iph<span style=color:#719e07>-&gt;</span>src_addr, iph<span style=color:#719e07>-&gt;</span>dst_addr, sport, dport);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>if</span> (r) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#268bd2>cpu_fdir_redirect_pkt</span>(mbuf, r<span style=color:#719e07>-&gt;</span>cid);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>*</span>redirected <span style=color:#719e07>=</span> <span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>return</span> EDPVS_OK;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#586e75>// share spin lock with dataplan, only add/del during inialization!!
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#dc322f>int</span> <span style=color:#268bd2>cpu_fdir_rule_add</span>(<span style=color:#dc322f>rte_be32_t</span> dst, <span style=color:#dc322f>rte_be32_t</span> d_mask,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                        <span style=color:#dc322f>rte_be16_t</span> dport_from, <span style=color:#dc322f>rte_be16_t</span> dport_to,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                        <span style=color:#dc322f>uint8_t</span> proto, <span style=color:#dc322f>uint8_t</span> cid)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>int</span> i <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>struct</span> cpu_fdir <span style=color:#719e07>*</span>r;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>for</span> (i <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>; i <span style=color:#719e07>&lt;</span> <span style=color:#268bd2>get_numa_nodes</span>(); i<span style=color:#719e07>++</span>) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>if</span> (<span style=color:#268bd2>unlikely</span>(<span style=color:#268bd2>rte_mempool_get</span>(g_cpu_fdir_cache[i], (<span style=color:#dc322f>void</span> <span style=color:#719e07>**</span>)<span style=color:#719e07>&amp;</span>r) <span style=color:#719e07>!=</span> <span style=color:#2aa198>0</span>)) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#268bd2>RTE_LOG</span>(WARNING, CPU_FDIR,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                    <span style=color:#2aa198>&#34;%s: no memory for cpu fdir add</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>, __func__);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#719e07>return</span> EDPVS_NOMEM;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#268bd2>memset</span>(r, <span style=color:#2aa198>0</span>, <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> cpu_fdir));
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        r<span style=color:#719e07>-&gt;</span>daddr <span style=color:#719e07>=</span> dst;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        r<span style=color:#719e07>-&gt;</span>daddr_mask <span style=color:#719e07>=</span> d_mask;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        r<span style=color:#719e07>-&gt;</span>dport_from <span style=color:#719e07>=</span> dport_from;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        r<span style=color:#719e07>-&gt;</span>dport_to   <span style=color:#719e07>=</span> dport_to;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        r<span style=color:#719e07>-&gt;</span>proto      <span style=color:#719e07>=</span> proto;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        r<span style=color:#719e07>-&gt;</span>cid        <span style=color:#719e07>=</span> cid;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#268bd2>rte_spinlock_lock</span>(<span style=color:#719e07>&amp;</span>cpu_fdir_tbl_lock[i]);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#268bd2>list_add</span>(<span style=color:#719e07>&amp;</span>r<span style=color:#719e07>-&gt;</span>list, <span style=color:#719e07>&amp;</span>g_cpu_fdir_tbl[i]);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#268bd2>rte_atomic32_inc</span>(<span style=color:#719e07>&amp;</span>num_fdir_rules[i]);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#268bd2>rte_spinlock_unlock</span>(<span style=color:#719e07>&amp;</span>cpu_fdir_tbl_lock[i]);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>return</span> EDPVS_OK;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#dc322f>int</span> <span style=color:#268bd2>cpu_fdir_rule_del</span>(<span style=color:#dc322f>rte_be32_t</span> dst, <span style=color:#dc322f>rte_be32_t</span> d_mask,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                        <span style=color:#dc322f>rte_be16_t</span> dport_from, <span style=color:#dc322f>rte_be16_t</span> dport_to,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                        <span style=color:#dc322f>uint8_t</span> proto)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>int</span> i <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>struct</span> cpu_fdir <span style=color:#719e07>*</span>r, <span style=color:#719e07>*</span>r_next;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>for</span> (i <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>; i <span style=color:#719e07>&lt;</span> <span style=color:#268bd2>get_numa_nodes</span>(); i<span style=color:#719e07>++</span>) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#268bd2>rte_spinlock_lock</span>(<span style=color:#719e07>&amp;</span>cpu_fdir_tbl_lock[i]);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#586e75>// only delete first rule in list
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#719e07>+</span>        <span style=color:#268bd2>list_for_each_entry_safe</span>(r, r_next, <span style=color:#719e07>&amp;</span>g_cpu_fdir_tbl[<span style=color:#268bd2>rte_socket_id</span>()], list) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#719e07>if</span> ( r<span style=color:#719e07>-&gt;</span>proto <span style=color:#719e07>==</span> proto
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                <span style=color:#719e07>&amp;&amp;</span> (dport_from <span style=color:#719e07>==</span> r<span style=color:#719e07>-&gt;</span>dport_from)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                <span style=color:#719e07>&amp;&amp;</span> (dport_to <span style=color:#719e07>==</span> r<span style=color:#719e07>-&gt;</span>dport_to)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                <span style=color:#719e07>&amp;&amp;</span> (dst <span style=color:#719e07>==</span> r<span style=color:#719e07>-&gt;</span>daddr)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                <span style=color:#719e07>&amp;&amp;</span> (d_mask <span style=color:#719e07>==</span> r<span style=color:#719e07>-&gt;</span>daddr_mask)) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                <span style=color:#268bd2>list_del</span>(<span style=color:#719e07>&amp;</span>r<span style=color:#719e07>-&gt;</span>list);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                <span style=color:#268bd2>rte_atomic32_dec</span>(<span style=color:#719e07>&amp;</span>num_fdir_rules[i]);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#268bd2>rte_spinlock_unlock</span>(<span style=color:#719e07>&amp;</span>cpu_fdir_tbl_lock[i]);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>return</span> EDPVS_OK;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#dc322f>void</span> <span style=color:#268bd2>cpu_fdir_ring_proc</span>(<span style=color:#dc322f>lcoreid_t</span> cid)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>struct</span> rte_mbuf <span style=color:#719e07>*</span>mbufs[NETIF_MAX_PKT_BURST];
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>uint16_t</span> nb_rb;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>lcoreid_t</span> peer_cid;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>cpu_fdir_enable) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>return</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    cid <span style=color:#719e07>=</span> <span style=color:#268bd2>rte_lcore_id</span>();
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>for</span> (peer_cid <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>; peer_cid <span style=color:#719e07>&lt;</span> DPVS_MAX_LCORE; peer_cid<span style=color:#719e07>++</span>) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>if</span> (cpu_fdir_ring[cid][peer_cid]) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            nb_rb <span style=color:#719e07>=</span> <span style=color:#268bd2>rte_ring_dequeue_burst</span>(cpu_fdir_ring[cid][peer_cid],
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                                           (<span style=color:#dc322f>void</span><span style=color:#719e07>**</span>)mbufs,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                                           NETIF_MAX_PKT_BURST, <span style=color:#b58900>NULL</span>);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#719e07>if</span> (nb_rb <span style=color:#719e07>&gt;</span> <span style=color:#2aa198>0</span>) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                <span style=color:#268bd2>lcore_process_packets</span>(mbufs, cid, nb_rb, <span style=color:#2aa198>1</span>);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#dc322f>int</span> <span style=color:#268bd2>cpu_fdir_ring_create</span>(<span style=color:#dc322f>void</span>)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>char</span> name_buf[RTE_RING_NAMESIZE];
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>int</span> socket_id;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>lcoreid_t</span> cid, peer_cid;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    socket_id <span style=color:#719e07>=</span> <span style=color:#268bd2>rte_socket_id</span>();
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>for</span> (cid <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>; cid <span style=color:#719e07>&lt;</span> DPVS_MAX_LCORE; cid<span style=color:#719e07>++</span>) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>if</span> (<span style=color:#719e07>!</span><span style=color:#268bd2>netif_lcore_is_fwd_worker</span>(cid)) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#719e07>continue</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>for</span> (peer_cid <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>; peer_cid <span style=color:#719e07>&lt;</span> DPVS_MAX_LCORE; peer_cid<span style=color:#719e07>++</span>) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#719e07>if</span> (<span style=color:#719e07>!</span><span style=color:#268bd2>netif_lcore_is_fwd_worker</span>(peer_cid)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                <span style=color:#719e07>||</span> cid <span style=color:#719e07>==</span> peer_cid) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                <span style=color:#719e07>continue</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#268bd2>snprintf</span>(name_buf, RTE_RING_NAMESIZE,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                     <span style=color:#2aa198>&#34;cpu_fdir_ring[%d[%d]&#34;</span>, cid, peer_cid);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            cpu_fdir_ring[cid][peer_cid] <span style=color:#719e07>=</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                <span style=color:#268bd2>rte_ring_create</span>(name_buf, CPU_FDIR_RING_SIZE, socket_id,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                                RING_F_SP_ENQ <span style=color:#719e07>|</span> RING_F_SC_DEQ);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>cpu_fdir_ring[cid][peer_cid]) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                <span style=color:#268bd2>RTE_LOG</span>(ERR, CPU_FDIR,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                        <span style=color:#2aa198>&#34;%s: failed to create cpu_fdir_ring[%d][%d]</span><span style=color:#cb4b16>\n</span><span style=color:#2aa198>&#34;</span>,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                        __func__, cid, peer_cid);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                <span style=color:#719e07>return</span> EDPVS_NOMEM;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>return</span> EDPVS_OK;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#dc322f>void</span> <span style=color:#268bd2>cpu_fdir_ring_free</span>(<span style=color:#dc322f>void</span>)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>lcoreid_t</span> cid, peer_cid;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>for</span> (cid <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>; cid <span style=color:#719e07>&lt;</span> DPVS_MAX_LCORE; cid<span style=color:#719e07>++</span>) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>for</span> (peer_cid <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>; peer_cid <span style=color:#719e07>&lt;</span> DPVS_MAX_LCORE; peer_cid<span style=color:#719e07>++</span>) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#268bd2>rte_ring_free</span>(cpu_fdir_ring[cid][peer_cid]);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#dc322f>int</span> <span style=color:#268bd2>cpu_fdir_table_cache_alloc</span>(<span style=color:#dc322f>void</span>)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>int</span> i;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>char</span> pool_name[<span style=color:#2aa198>32</span>];
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>for</span> (i <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>; i <span style=color:#719e07>&lt;</span> <span style=color:#268bd2>get_numa_nodes</span>(); i<span style=color:#719e07>++</span>) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#268bd2>snprintf</span>(pool_name, <span style=color:#719e07>sizeof</span>(pool_name), <span style=color:#2aa198>&#34;cpu_fdir_%d&#34;</span>, i);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        g_cpu_fdir_cache[i] <span style=color:#719e07>=</span> <span style=color:#268bd2>rte_mempool_create</span>(pool_name,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                        CPU_FDIR_TBL_SIZE,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                        <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> cpu_fdir),
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                        <span style=color:#2aa198>256</span>, <span style=color:#2aa198>0</span>, <span style=color:#b58900>NULL</span>, <span style=color:#b58900>NULL</span>, <span style=color:#b58900>NULL</span>, <span style=color:#b58900>NULL</span>,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                        i, <span style=color:#2aa198>0</span>);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>g_cpu_fdir_cache[i]) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#719e07>return</span> EDPVS_NOMEM;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>return</span> EDPVS_OK;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#dc322f>void</span> <span style=color:#268bd2>cpu_fdir_table_cache_free</span>(<span style=color:#dc322f>void</span>)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>int</span> i;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>for</span> (i <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>; i <span style=color:#719e07>&lt;</span> <span style=color:#268bd2>get_numa_nodes</span>(); i<span style=color:#719e07>++</span>) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#268bd2>rte_mempool_free</span>(g_cpu_fdir_cache[i]);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#dc322f>int</span> <span style=color:#268bd2>cpu_fdir_table_create</span>(<span style=color:#dc322f>void</span>)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>int</span> i;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>if</span> (<span style=color:#268bd2>cpu_fdir_table_cache_alloc</span>() <span style=color:#719e07>!=</span> EDPVS_OK) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>goto</span> cache_free;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    g_cpu_fdir_tbl <span style=color:#719e07>=</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#268bd2>rte_malloc</span>(<span style=color:#b58900>NULL</span>, <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> list_head ),
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                          RTE_CACHE_LINE_SIZE);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>g_cpu_fdir_tbl) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>goto</span> cache_free;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#586e75>/* per socket */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>for</span> (i <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>; i <span style=color:#719e07>&lt;</span> <span style=color:#268bd2>get_numa_nodes</span>(); i<span style=color:#719e07>++</span>) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#268bd2>INIT_LIST_HEAD</span>(<span style=color:#719e07>&amp;</span>g_cpu_fdir_tbl[i]);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#268bd2>rte_spinlock_init</span>(<span style=color:#719e07>&amp;</span>cpu_fdir_tbl_lock[i]);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>return</span> EDPVS_OK;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>cache_free:
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#268bd2>cpu_fdir_table_cache_free</span>();
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>return</span> EDPVS_NOMEM;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#dc322f>void</span> <span style=color:#268bd2>cpu_fdir_table_free</span>(<span style=color:#dc322f>void</span>)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#268bd2>cpu_fdir_table_cache_free</span>();
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>if</span> (g_cpu_fdir_tbl) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#268bd2>rte_free</span>(g_cpu_fdir_tbl);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#dc322f>int</span> <span style=color:#268bd2>fdir_sockopt_set</span>(<span style=color:#dc322f>sockoptid_t</span> opt, <span style=color:#719e07>const</span> <span style=color:#dc322f>void</span> <span style=color:#719e07>*</span>cf, <span style=color:#dc322f>size_t</span> size)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>cpu_fdir_enable) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>return</span> EDPVS_NOTSUPP;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>struct</span> cpu_fdir_conf <span style=color:#719e07>*</span>conf <span style=color:#719e07>=</span> (<span style=color:#719e07>struct</span> cpu_fdir_conf<span style=color:#719e07>*</span>)cf;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>cf <span style=color:#719e07>||</span> size <span style=color:#719e07>!=</span> <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>*</span>conf))
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>return</span> EDPVS_INVAL;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>uint32_t</span> daddr_mask <span style=color:#719e07>=</span> <span style=color:#268bd2>htonl</span>(<span style=color:#2aa198>0xFFFFFFFF</span> <span style=color:#719e07>&lt;&lt;</span> (<span style=color:#2aa198>32</span> <span style=color:#719e07>-</span> conf<span style=color:#719e07>-&gt;</span>d_plen));
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>switch</span> (opt) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>case</span> SOCKOPT_SET_FDIR_ADD:
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#719e07>return</span> <span style=color:#268bd2>cpu_fdir_rule_add</span>(conf<span style=color:#719e07>-&gt;</span>daddr, daddr_mask,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                                <span style=color:#268bd2>htons</span>(conf<span style=color:#719e07>-&gt;</span>dport_from), <span style=color:#268bd2>htons</span>(conf<span style=color:#719e07>-&gt;</span>dport_to),
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                                conf<span style=color:#719e07>-&gt;</span>proto, conf<span style=color:#719e07>-&gt;</span>cid);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>case</span> SOCKOPT_SET_FDIR_DEL:
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#719e07>return</span> <span style=color:#268bd2>cpu_fdir_rule_del</span>(conf<span style=color:#719e07>-&gt;</span>daddr, daddr_mask,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                                <span style=color:#268bd2>htons</span>(conf<span style=color:#719e07>-&gt;</span>dport_from), <span style=color:#268bd2>htons</span>(conf<span style=color:#719e07>-&gt;</span>dport_to),
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                                conf<span style=color:#719e07>-&gt;</span>proto);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>default</span><span style=color:#719e07>:</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#719e07>return</span> EDPVS_NOTSUPP;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>return</span> EDPVS_NOTSUPP;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#dc322f>int</span> <span style=color:#268bd2>fdir_sockopt_get</span>(<span style=color:#dc322f>sockoptid_t</span> opt, <span style=color:#719e07>const</span> <span style=color:#dc322f>void</span> <span style=color:#719e07>*</span>conf, <span style=color:#dc322f>size_t</span> size,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                             <span style=color:#dc322f>void</span> <span style=color:#719e07>**</span>out, <span style=color:#dc322f>size_t</span> <span style=color:#719e07>*</span>outsize)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>cpu_fdir_enable) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>return</span> EDPVS_NOTSUPP;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>struct</span> cpu_fdir_conf_array <span style=color:#719e07>*</span>array;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>size_t</span> nrule;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>struct</span> cpu_fdir <span style=color:#719e07>*</span>r;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>int</span> off <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    nrule <span style=color:#719e07>=</span> <span style=color:#268bd2>rte_atomic32_read</span>(<span style=color:#719e07>&amp;</span>this_num_fdir_rules);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>*</span>outsize <span style=color:#719e07>=</span> <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> cpu_fdir_conf_array) <span style=color:#719e07>+</span> nrule <span style=color:#719e07>*</span> <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> cpu_fdir_conf);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>*</span>out <span style=color:#719e07>=</span> <span style=color:#268bd2>rte_calloc</span>(<span style=color:#b58900>NULL</span>, <span style=color:#2aa198>1</span>, <span style=color:#719e07>*</span>outsize, <span style=color:#2aa198>0</span>);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>(<span style=color:#719e07>*</span>out))
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>return</span> EDPVS_NOMEM;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    array <span style=color:#719e07>=</span> (<span style=color:#719e07>struct</span> cpu_fdir_conf_array<span style=color:#719e07>*</span>)<span style=color:#719e07>*</span>out;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#268bd2>list_for_each_entry</span>(r, <span style=color:#719e07>&amp;</span>g_cpu_fdir_tbl[<span style=color:#268bd2>rte_socket_id</span>()], list) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>if</span> (off <span style=color:#719e07>&gt;=</span> nrule) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            <span style=color:#719e07>break</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#268bd2>memset</span>(<span style=color:#719e07>&amp;</span>array<span style=color:#719e07>-&gt;</span>rules[off], <span style=color:#2aa198>0</span>, <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> cpu_fdir_conf));
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        array<span style=color:#719e07>-&gt;</span>rules[off].proto <span style=color:#719e07>=</span> r<span style=color:#719e07>-&gt;</span>proto;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        array<span style=color:#719e07>-&gt;</span>rules[off].cid <span style=color:#719e07>=</span> r<span style=color:#719e07>-&gt;</span>cid;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        array<span style=color:#719e07>-&gt;</span>rules[off].daddr <span style=color:#719e07>=</span> r<span style=color:#719e07>-&gt;</span>daddr;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        array<span style=color:#719e07>-&gt;</span>rules[off].d_plen <span style=color:#719e07>=</span> <span style=color:#2aa198>32</span> <span style=color:#719e07>-</span> <span style=color:#268bd2>__builtin_clz</span>(r<span style=color:#719e07>-&gt;</span>daddr_mask);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        array<span style=color:#719e07>-&gt;</span>rules[off].dport_from <span style=color:#719e07>=</span> r<span style=color:#719e07>-&gt;</span>dport_from;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        array<span style=color:#719e07>-&gt;</span>rules[off].dport_to <span style=color:#719e07>=</span> r<span style=color:#719e07>-&gt;</span>dport_to;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        off<span style=color:#719e07>++</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    array<span style=color:#719e07>-&gt;</span>nrule <span style=color:#719e07>=</span> off;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>return</span> EDPVS_OK;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#719e07>struct</span> dpvs_sockopts cpu_fdir_sockopts <span style=color:#719e07>=</span> {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    .version        <span style=color:#719e07>=</span> SOCKOPT_VERSION,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    .set_opt_min    <span style=color:#719e07>=</span> SOCKOPT_SET_FDIR_ADD,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    .set_opt_max    <span style=color:#719e07>=</span> SOCKOPT_SET_FDIR_DEL,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    .set            <span style=color:#719e07>=</span> fdir_sockopt_set,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    .get_opt_min    <span style=color:#719e07>=</span> SOCKOPT_GET_FDIR_SHOW,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    .get_opt_max    <span style=color:#719e07>=</span> SOCKOPT_GET_FDIR_SHOW,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    .get            <span style=color:#719e07>=</span> fdir_sockopt_get,
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>};
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#dc322f>int</span> <span style=color:#268bd2>cpu_fdir_init</span>(<span style=color:#dc322f>void</span>)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>int</span> err;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>cpu_fdir_enable) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>return</span> EDPVS_OK;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    err <span style=color:#719e07>=</span> <span style=color:#268bd2>cpu_fdir_ring_create</span>();
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>if</span> (err <span style=color:#719e07>!=</span> EDPVS_OK) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>return</span> err;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>if</span> ((err <span style=color:#719e07>=</span> <span style=color:#268bd2>sockopt_register</span>(<span style=color:#719e07>&amp;</span>cpu_fdir_sockopts)) <span style=color:#719e07>!=</span> EDPVS_OK) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>         <span style=color:#719e07>return</span> err;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>       
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>return</span> <span style=color:#268bd2>cpu_fdir_table_create</span>();
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#dc322f>int</span> <span style=color:#268bd2>cpu_fdir_term</span>(<span style=color:#dc322f>void</span>)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>int</span> err;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>cpu_fdir_enable) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>return</span> EDPVS_OK;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>if</span> ((err <span style=color:#719e07>=</span> <span style=color:#268bd2>sockopt_unregister</span>(<span style=color:#719e07>&amp;</span>cpu_fdir_sockopts)) <span style=color:#719e07>!=</span> EDPVS_OK) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>return</span> err;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#268bd2>cpu_fdir_ring_free</span>();
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#268bd2>cpu_fdir_table_free</span>();
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>return</span> EDPVS_OK;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span>diff <span style=color:#719e07>--</span>git a<span style=color:#719e07>/</span>src<span style=color:#719e07>/</span>fdir<span style=color:#719e07>/</span>parser.c b<span style=color:#719e07>/</span>src<span style=color:#719e07>/</span>fdir<span style=color:#719e07>/</span>parser.c
+</span></span><span style=display:flex><span>new file mode <span style=color:#2aa198>100644</span>
+</span></span><span style=display:flex><span>index <span style=color:#2aa198>0000000000000000000000000000000000000000..8</span>dc136ed2c5fed27d4aba1010acc0f79703ad92a
+</span></span><span style=display:flex><span><span style=color:#719e07>---</span> <span style=color:#719e07>/</span>dev<span style=color:#719e07>/</span>null
+</span></span><span style=display:flex><span><span style=color:#719e07>+++</span> b<span style=color:#719e07>/</span>src<span style=color:#719e07>/</span>fdir<span style=color:#719e07>/</span>parser.c
+</span></span><span style=display:flex><span>@@ <span style=color:#719e07>-</span><span style=color:#2aa198>0</span>,<span style=color:#2aa198>0</span> <span style=color:#719e07>+</span><span style=color:#2aa198>1</span>,<span style=color:#2aa198>156</span> @@
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>#include <span style=color:#2aa198>&#34;fdir/parser.h&#34;</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#dc322f>void</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#268bd2>parse_ipv4</span>(<span style=color:#719e07>struct</span> sk_buff_info<span style=color:#719e07>*</span> this_sk_info)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>struct</span> rte_ipv4_hdr <span style=color:#719e07>*</span>ipv4_hdr <span style=color:#719e07>=</span> this_sk_info<span style=color:#719e07>-&gt;</span>iph;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	this_sk_info<span style=color:#719e07>-&gt;</span>l3_len <span style=color:#719e07>=</span> <span style=color:#268bd2>rte_ipv4_hdr_len</span>(ipv4_hdr);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	this_sk_info<span style=color:#719e07>-&gt;</span>l4_proto <span style=color:#719e07>=</span> ipv4_hdr<span style=color:#719e07>-&gt;</span>next_proto_id;	<span style=color:#586e75>/* only fill l4_len for TCP, it&#39;s useful for TSO */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#719e07>if</span> (this_sk_info<span style=color:#719e07>-&gt;</span>l4_proto <span style=color:#719e07>==</span> IPPROTO_TCP) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        this_sk_info<span style=color:#719e07>-&gt;</span>tcph <span style=color:#719e07>=</span> (<span style=color:#719e07>struct</span> rte_tcp_hdr <span style=color:#719e07>*</span>)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            ((<span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>)ipv4_hdr <span style=color:#719e07>+</span> this_sk_info<span style=color:#719e07>-&gt;</span>l3_len);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        this_sk_info<span style=color:#719e07>-&gt;</span>l4_len <span style=color:#719e07>=</span> (this_sk_info<span style=color:#719e07>-&gt;</span>tcph<span style=color:#719e07>-&gt;</span>data_off <span style=color:#719e07>&amp;</span> <span style=color:#2aa198>0xf0</span>) <span style=color:#719e07>&gt;&gt;</span> <span style=color:#2aa198>2</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	} <span style=color:#719e07>else</span> <span style=color:#719e07>if</span> (this_sk_info<span style=color:#719e07>-&gt;</span>l4_proto <span style=color:#719e07>==</span> IPPROTO_UDP) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        this_sk_info<span style=color:#719e07>-&gt;</span>udph <span style=color:#719e07>=</span> (<span style=color:#719e07>struct</span> rte_udp_hdr <span style=color:#719e07>*</span>)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>            ((<span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>)ipv4_hdr <span style=color:#719e07>+</span> this_sk_info<span style=color:#719e07>-&gt;</span>l3_len);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		this_sk_info<span style=color:#719e07>-&gt;</span>l4_len <span style=color:#719e07>=</span> <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> rte_udp_hdr);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    } <span style=color:#719e07>else</span> <span style=color:#719e07>if</span> (this_sk_info<span style=color:#719e07>-&gt;</span>l4_proto <span style=color:#719e07>==</span> IPPROTO_ICMP) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		this_sk_info<span style=color:#719e07>-&gt;</span>icmph <span style=color:#719e07>=</span> (<span style=color:#719e07>struct</span> rte_icmp_hdr<span style=color:#719e07>*</span>)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>			((<span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>)ipv4_hdr <span style=color:#719e07>+</span> this_sk_info<span style=color:#719e07>-&gt;</span>l3_len);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	} <span style=color:#719e07>else</span> 
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		this_sk_info<span style=color:#719e07>-&gt;</span>l4_len <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#dc322f>void</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#268bd2>update_tunnel_outer</span>(<span style=color:#719e07>struct</span> sk_buff_info<span style=color:#719e07>*</span> this_sk_info)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	this_sk_info<span style=color:#719e07>-&gt;</span>is_tunnel <span style=color:#719e07>=</span> <span style=color:#2aa198>1</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	this_sk_info<span style=color:#719e07>-&gt;</span>outer_ethertype <span style=color:#719e07>=</span> this_sk_info<span style=color:#719e07>-&gt;</span>ethertype;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	this_sk_info<span style=color:#719e07>-&gt;</span>outer_l2_len <span style=color:#719e07>=</span> this_sk_info<span style=color:#719e07>-&gt;</span>l2_len;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	this_sk_info<span style=color:#719e07>-&gt;</span>outer_l3_len <span style=color:#719e07>=</span> this_sk_info<span style=color:#719e07>-&gt;</span>l3_len;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	this_sk_info<span style=color:#719e07>-&gt;</span>outer_l4_proto <span style=color:#719e07>=</span> this_sk_info<span style=color:#719e07>-&gt;</span>l4_proto;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	this_sk_info<span style=color:#719e07>-&gt;</span>outer_l2_hdr <span style=color:#719e07>=</span> this_sk_info<span style=color:#719e07>-&gt;</span>l2_hdr;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    this_sk_info<span style=color:#719e07>-&gt;</span>outer_l3_hdr <span style=color:#719e07>=</span> this_sk_info<span style=color:#719e07>-&gt;</span>l3_hdr;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    this_sk_info<span style=color:#719e07>-&gt;</span>outer_l4_hdr <span style=color:#719e07>=</span> this_sk_info<span style=color:#719e07>-&gt;</span>l4_hdr;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#586e75>/*
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+ * Parse an ethernet header to fill the ethertype, l2_len, l3_len and
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+ * ipproto. This function is able to recognize IPv4 with optional VLAN
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+ * headers.
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+ */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#dc322f>void</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#268bd2>parse_ethernet</span>(<span style=color:#719e07>struct</span> sk_buff_info<span style=color:#719e07>*</span> this_sk_info)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>struct</span> rte_ether_hdr <span style=color:#719e07>*</span>eth_hdr <span style=color:#719e07>=</span> this_sk_info<span style=color:#719e07>-&gt;</span>eth;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#719e07>struct</span> rte_vlan_hdr <span style=color:#719e07>*</span>vlan_hdr;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	this_sk_info<span style=color:#719e07>-&gt;</span>l2_len <span style=color:#719e07>=</span> <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> rte_ether_hdr);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	this_sk_info<span style=color:#719e07>-&gt;</span>ethertype <span style=color:#719e07>=</span> this_sk_info<span style=color:#719e07>-&gt;</span>eth<span style=color:#719e07>-&gt;</span>ether_type;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#719e07>while</span> (this_sk_info<span style=color:#719e07>-&gt;</span>ethertype <span style=color:#719e07>==</span> <span style=color:#268bd2>_htons</span>(RTE_ETHER_TYPE_VLAN) <span style=color:#719e07>||</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	       this_sk_info<span style=color:#719e07>-&gt;</span>ethertype <span style=color:#719e07>==</span> <span style=color:#268bd2>_htons</span>(RTE_ETHER_TYPE_QINQ)) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		vlan_hdr <span style=color:#719e07>=</span> (<span style=color:#719e07>struct</span> rte_vlan_hdr <span style=color:#719e07>*</span>)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>			((<span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>)eth_hdr <span style=color:#719e07>+</span> this_sk_info<span style=color:#719e07>-&gt;</span>l2_len);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		this_sk_info<span style=color:#719e07>-&gt;</span>l2_len  <span style=color:#719e07>+=</span> <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> rte_vlan_hdr);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		this_sk_info<span style=color:#719e07>-&gt;</span>ethertype <span style=color:#719e07>=</span> vlan_hdr<span style=color:#719e07>-&gt;</span>eth_proto;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#719e07>switch</span> (this_sk_info<span style=color:#719e07>-&gt;</span>ethertype) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#719e07>case</span> <span style=color:#268bd2>_htons</span>(RTE_ETHER_TYPE_IPV4)<span style=color:#719e07>:</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>			this_sk_info<span style=color:#719e07>-&gt;</span>iph <span style=color:#719e07>=</span> (<span style=color:#719e07>struct</span> rte_ipv4_hdr <span style=color:#719e07>*</span>)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>					((<span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>)this_sk_info<span style=color:#719e07>-&gt;</span>eth <span style=color:#719e07>+</span> this_sk_info<span style=color:#719e07>-&gt;</span>l2_len);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>			<span style=color:#268bd2>parse_ipv4</span>(this_sk_info);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>			<span style=color:#719e07>break</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#719e07>default</span><span style=color:#719e07>:</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>			this_sk_info<span style=color:#719e07>-&gt;</span>l4_len <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>			this_sk_info<span style=color:#719e07>-&gt;</span>l3_len <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>			this_sk_info<span style=color:#719e07>-&gt;</span>l4_proto <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>			<span style=color:#719e07>break</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#586e75>/* Parse a geneve header */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#dc322f>void</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#268bd2>parse_geneve</span>(<span style=color:#719e07>struct</span> sk_buff_info<span style=color:#719e07>*</span> this_sk_info)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>struct</span> rte_geneve_hdr <span style=color:#719e07>*</span>genh;	<span style=color:#586e75>/* Check udp destination port. */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#719e07>if</span> (this_sk_info<span style=color:#719e07>-&gt;</span>udph<span style=color:#719e07>-&gt;</span>dst_port <span style=color:#719e07>!=</span> <span style=color:#268bd2>_htons</span>(RTE_GENEVE_DEFAULT_PORT)) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#719e07>return</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	genh <span style=color:#719e07>=</span> (<span style=color:#719e07>struct</span> rte_geneve_hdr <span style=color:#719e07>*</span>)((<span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>)this_sk_info<span style=color:#719e07>-&gt;</span>udph <span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>				<span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> rte_udp_hdr));
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    this_sk_info<span style=color:#719e07>-&gt;</span>genh <span style=color:#719e07>=</span> genh;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    this_sk_info<span style=color:#719e07>-&gt;</span>tunnel_type <span style=color:#719e07>=</span> TUNNEL_GENEVE;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	this_sk_info<span style=color:#719e07>-&gt;</span>tunnel_len <span style=color:#719e07>=</span> <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> rte_geneve_hdr) <span style=color:#719e07>+</span> this_sk_info<span style=color:#719e07>-&gt;</span>genh<span style=color:#719e07>-&gt;</span>opt_len <span style=color:#719e07>*</span> <span style=color:#2aa198>4</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#719e07>if</span> (<span style=color:#719e07>!</span>this_sk_info<span style=color:#719e07>-&gt;</span>genh<span style=color:#719e07>-&gt;</span>proto <span style=color:#719e07>||</span> this_sk_info<span style=color:#719e07>-&gt;</span>genh<span style=color:#719e07>-&gt;</span>proto <span style=color:#719e07>==</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	    <span style=color:#268bd2>_htons</span>(RTE_ETHER_TYPE_IPV4)) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#268bd2>update_tunnel_outer</span>(this_sk_info);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		this_sk_info<span style=color:#719e07>-&gt;</span>iph <span style=color:#719e07>=</span> (<span style=color:#719e07>struct</span> rte_ipv4_hdr <span style=color:#719e07>*</span>)((<span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>)this_sk_info<span style=color:#719e07>-&gt;</span>genh <span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>			   this_sk_info<span style=color:#719e07>-&gt;</span>tunnel_len);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#268bd2>parse_ipv4</span>(this_sk_info);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		this_sk_info<span style=color:#719e07>-&gt;</span>ethertype <span style=color:#719e07>=</span> <span style=color:#268bd2>_htons</span>(RTE_ETHER_TYPE_IPV4);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		this_sk_info<span style=color:#719e07>-&gt;</span>l2_len <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	} <span style=color:#719e07>else</span> <span style=color:#719e07>if</span> (this_sk_info<span style=color:#719e07>-&gt;</span>genh<span style=color:#719e07>-&gt;</span>proto <span style=color:#719e07>==</span> <span style=color:#268bd2>_htons</span>(RTE_GENEVE_TYPE_ETH)) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#268bd2>update_tunnel_outer</span>(this_sk_info);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		this_sk_info<span style=color:#719e07>-&gt;</span>eth <span style=color:#719e07>=</span> (<span style=color:#719e07>struct</span> rte_ether_hdr <span style=color:#719e07>*</span>)((<span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>)this_sk_info<span style=color:#719e07>-&gt;</span>genh <span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>			  this_sk_info<span style=color:#719e07>-&gt;</span>tunnel_len);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#268bd2>parse_ethernet</span>(this_sk_info);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	} <span style=color:#719e07>else</span> {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#719e07>return</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	this_sk_info<span style=color:#719e07>-&gt;</span>recv_vni <span style=color:#719e07>=</span> genh<span style=color:#719e07>-&gt;</span>vni[<span style=color:#2aa198>0</span>]<span style=color:#719e07>&lt;&lt;</span><span style=color:#2aa198>16</span> <span style=color:#719e07>|</span> genh<span style=color:#719e07>-&gt;</span>vni[<span style=color:#2aa198>1</span>]<span style=color:#719e07>&lt;&lt;</span><span style=color:#2aa198>8</span> <span style=color:#719e07>|</span> genh<span style=color:#719e07>-&gt;</span>vni[<span style=color:#2aa198>2</span>];
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    this_sk_info<span style=color:#719e07>-&gt;</span>vni_flag <span style=color:#719e07>=</span> genh<span style=color:#719e07>-&gt;</span>reserved1 <span style=color:#719e07>&amp;</span> <span style=color:#2aa198>0x3f</span>; <span style=color:#586e75>// lower 6 bit
+</span></span></span><span style=display:flex><span><span style=color:#586e75></span><span style=color:#719e07>+</span>    <span style=color:#586e75>/* l2_len must be set correctly for nic offload */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	this_sk_info<span style=color:#719e07>-&gt;</span>l2_len <span style=color:#719e07>+=</span> this_sk_info<span style=color:#719e07>-&gt;</span>tunnel_len <span style=color:#719e07>+</span> <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> rte_udp_hdr);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#586e75>/* Parse a vxlan header */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#719e07>static</span> <span style=color:#dc322f>void</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#268bd2>parse_vxlan</span>(<span style=color:#719e07>struct</span> sk_buff_info<span style=color:#719e07>*</span> this_sk_info)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#586e75>/* check udp destination port, RTE_VXLAN_DEFAULT_PORT (4789) is the
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+	 * default vxlan port (rfc7348) or that the rx offload flag is set
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+	 * (i40e only currently)
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+	 */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#719e07>if</span> (this_sk_info<span style=color:#719e07>-&gt;</span>udph<span style=color:#719e07>-&gt;</span>dst_port <span style=color:#719e07>!=</span> <span style=color:#268bd2>_htons</span>(RTE_VXLAN_DEFAULT_PORT) <span style=color:#719e07>&amp;&amp;</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#268bd2>RTE_ETH_IS_TUNNEL_PKT</span>(this_sk_info<span style=color:#719e07>-&gt;</span>mbuf<span style=color:#719e07>-&gt;</span>packet_type) <span style=color:#719e07>==</span> <span style=color:#2aa198>0</span>) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>			<span style=color:#719e07>return</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#268bd2>update_tunnel_outer</span>(this_sk_info);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    this_sk_info<span style=color:#719e07>-&gt;</span>tunnel_type <span style=color:#719e07>=</span> TUNNEL_VXLAN;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    this_sk_info<span style=color:#719e07>-&gt;</span>tunnel_len <span style=color:#719e07>=</span> RTE_ETHER_VXLAN_HLEN;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    this_sk_info<span style=color:#719e07>-&gt;</span>vxlanh <span style=color:#719e07>=</span> (<span style=color:#719e07>struct</span> rte_vxlan_hdr <span style=color:#719e07>*</span>)((<span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>)this_sk_info<span style=color:#719e07>-&gt;</span>udph <span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> rte_udp_hdr));
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	this_sk_info<span style=color:#719e07>-&gt;</span>eth <span style=color:#719e07>=</span> (<span style=color:#719e07>struct</span> rte_ether_hdr <span style=color:#719e07>*</span>)((<span style=color:#dc322f>char</span> <span style=color:#719e07>*</span>)this_sk_info<span style=color:#719e07>-&gt;</span>vxlanh <span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>		<span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> rte_vxlan_hdr));
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#268bd2>parse_ethernet</span>(this_sk_info);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    this_sk_info<span style=color:#719e07>-&gt;</span>recv_vni <span style=color:#719e07>=</span> <span style=color:#268bd2>rte_be_to_cpu_32</span>(this_sk_info<span style=color:#719e07>-&gt;</span>vxlanh<span style=color:#719e07>-&gt;</span>vx_vni);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    this_sk_info<span style=color:#719e07>-&gt;</span>vni_flag <span style=color:#719e07>=</span> this_sk_info<span style=color:#719e07>-&gt;</span>vxlanh<span style=color:#719e07>-&gt;</span>vx_flags;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	this_sk_info<span style=color:#719e07>-&gt;</span>l2_len <span style=color:#719e07>+=</span> this_sk_info<span style=color:#719e07>-&gt;</span>tunnel_len; <span style=color:#586e75>/* add udp + vxlan */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span><span style=color:#dc322f>void</span> <span style=color:#268bd2>pkt_info_init</span>(<span style=color:#dc322f>pkt_info_t</span><span style=color:#719e07>*</span> pkt_info, <span style=color:#719e07>struct</span> rte_mbuf<span style=color:#719e07>*</span> mbuf)
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>{
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span> 	<span style=color:#268bd2>memset</span>(pkt_info, <span style=color:#2aa198>0</span>, <span style=color:#719e07>sizeof</span>(<span style=color:#719e07>struct</span> sk_buff_info));
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span> 	pkt_info<span style=color:#719e07>-&gt;</span>mbuf   <span style=color:#719e07>=</span> mbuf;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    pkt_info<span style=color:#719e07>-&gt;</span>l2_hdr <span style=color:#719e07>=</span> <span style=color:#268bd2>rte_pktmbuf_mtod</span>(pkt_info<span style=color:#719e07>-&gt;</span>mbuf, <span style=color:#719e07>struct</span> rte_ether_hdr<span style=color:#719e07>*</span>);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>	<span style=color:#268bd2>parse_ethernet</span>(pkt_info);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>     <span style=color:#586e75>/* check if it&#39;s a supported tunnel */</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>if</span> (pkt_info<span style=color:#719e07>-&gt;</span>l4_proto <span style=color:#719e07>==</span> IPPROTO_UDP) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>         <span style=color:#268bd2>parse_vxlan</span>(pkt_info);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>         <span style=color:#719e07>if</span> (pkt_info<span style=color:#719e07>-&gt;</span>is_tunnel) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>             <span style=color:#719e07>goto</span> tunnel_ok;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>         }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>         <span style=color:#268bd2>parse_geneve</span>(pkt_info);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>         <span style=color:#719e07>if</span> (pkt_info<span style=color:#719e07>-&gt;</span>is_tunnel) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>             <span style=color:#719e07>goto</span> tunnel_ok;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>         }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>     }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span> tunnel_ok:
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>return</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>}
+</span></span><span style=display:flex><span>diff <span style=color:#719e07>--</span>git a<span style=color:#719e07>/</span>src<span style=color:#719e07>/</span>main.c b<span style=color:#719e07>/</span>src<span style=color:#719e07>/</span>main.c
+</span></span><span style=display:flex><span>index <span style=color:#2aa198>00</span>ca8965593eaa41818d3158b3c670412505ff4e.<span style=color:#2aa198>.93f</span><span style=color:#2aa198>49638213</span>b7eb5341092c522d8a5cf2dc88daa <span style=color:#2aa198>100644</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>---</span> a<span style=color:#719e07>/</span>src<span style=color:#719e07>/</span>main.c
+</span></span><span style=display:flex><span><span style=color:#719e07>+++</span> b<span style=color:#719e07>/</span>src<span style=color:#719e07>/</span>main.c
+</span></span><span style=display:flex><span>@@ <span style=color:#719e07>-</span><span style=color:#2aa198>49</span>,<span style=color:#2aa198>6</span> <span style=color:#719e07>+</span><span style=color:#2aa198>49</span>,<span style=color:#2aa198>7</span> @@
+</span></span><span style=display:flex><span> <span style=color:#719e07>#include</span> <span style=color:#719e07>&#34;eal_mem.h&#34;</span><span style=color:#719e07>
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span> <span style=color:#719e07>#include</span> <span style=color:#719e07>&#34;scheduler.h&#34;</span><span style=color:#719e07>
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span> <span style=color:#719e07>#include</span> <span style=color:#719e07>&#34;pdump.h&#34;</span><span style=color:#719e07>
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span><span style=color:#719e07>+</span>#include <span style=color:#2aa198>&#34;fdir/cpu_fdir.h&#34;</span>
+</span></span><span style=display:flex><span> 
+</span></span><span style=display:flex><span> <span style=color:#719e07>#define DPVS    &#34;dpvs&#34;
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span> <span style=color:#719e07>#define RTE_LOGTYPE_DPVS RTE_LOGTYPE_USER1
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span>@@ <span style=color:#719e07>-</span><span style=color:#2aa198>107</span>,<span style=color:#2aa198>6</span> <span style=color:#719e07>+</span><span style=color:#2aa198>108</span>,<span style=color:#2aa198>8</span> @@ <span style=color:#719e07>static</span> <span style=color:#dc322f>void</span> <span style=color:#268bd2>inline</span> <span style=color:#268bd2>dpdk_version_check</span>(<span style=color:#dc322f>void</span>)
+</span></span><span style=display:flex><span>                     iftraf_init,         iftraf_term),          \
+</span></span><span style=display:flex><span>         <span style=color:#268bd2>DPVS_MODULE</span>(MODULE_EAL_MEM,     <span style=color:#2aa198>&#34;eal_mem&#34;</span>,              \
+</span></span><span style=display:flex><span>                     eal_mem_init,        eal_mem_term),         \
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#268bd2>DPVS_MODULE</span>(MODULE_CPU_FDIR,     <span style=color:#2aa198>&#34;cpu_fdir&#34;</span>,            \
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>                    cpu_fdir_init,     cpu_fdir_term),          \
+</span></span><span style=display:flex><span>         <span style=color:#268bd2>DPVS_MODULE</span>(MODULE_LAST,        <span style=color:#2aa198>&#34;last&#34;</span>,                 \
+</span></span><span style=display:flex><span>                     <span style=color:#b58900>NULL</span>,                <span style=color:#b58900>NULL</span>)                  \
+</span></span><span style=display:flex><span>     }
+</span></span><span style=display:flex><span>diff <span style=color:#719e07>--</span>git a<span style=color:#719e07>/</span>src<span style=color:#719e07>/</span>netif.c b<span style=color:#719e07>/</span>src<span style=color:#719e07>/</span>netif.c
+</span></span><span style=display:flex><span>index d2ae6cf91da116ee7ccb3981eb1d40122da33d6b.<span style=color:#2aa198>.85</span>b0a0f44e6f636dd4bc3444ecc5aa42e5fd3078 <span style=color:#2aa198>100644</span>
+</span></span><span style=display:flex><span><span style=color:#719e07>---</span> a<span style=color:#719e07>/</span>src<span style=color:#719e07>/</span>netif.c
+</span></span><span style=display:flex><span><span style=color:#719e07>+++</span> b<span style=color:#719e07>/</span>src<span style=color:#719e07>/</span>netif.c
+</span></span><span style=display:flex><span>@@ <span style=color:#719e07>-</span><span style=color:#2aa198>44</span>,<span style=color:#2aa198>6</span> <span style=color:#719e07>+</span><span style=color:#2aa198>44</span>,<span style=color:#2aa198>7</span> @@
+</span></span><span style=display:flex><span> <span style=color:#719e07>#include</span> <span style=color:#719e07>&lt;netinet/in.h&gt;</span><span style=color:#719e07>
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span> <span style=color:#719e07>#include</span> <span style=color:#719e07>&lt;arpa/inet.h&gt;</span><span style=color:#719e07>
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span> <span style=color:#719e07>#include</span> <span style=color:#719e07>&lt;ipvs/redirect.h&gt;</span><span style=color:#719e07>
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span><span style=color:#719e07>+</span>#include <span style=color:#719e07>&lt;</span>fdir<span style=color:#719e07>/</span>cpu_fdir.h<span style=color:#719e07>&gt;</span>
+</span></span><span style=display:flex><span> <span style=color:#719e07>#ifdef CONFIG_ICMP_REDIRECT_CORE
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span> <span style=color:#719e07>#include</span> <span style=color:#719e07>&#34;icmp.h&#34;</span><span style=color:#719e07>
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span> <span style=color:#719e07>#endif
+</span></span></span><span style=display:flex><span><span style=color:#719e07></span>@@ <span style=color:#719e07>-</span><span style=color:#2aa198>2373</span>,<span style=color:#2aa198>6</span> <span style=color:#719e07>+</span><span style=color:#2aa198>2374</span>,<span style=color:#2aa198>12</span> @@ <span style=color:#719e07>static</span> <span style=color:#dc322f>int</span> <span style=color:#268bd2>netif_deliver_mbuf</span>(<span style=color:#719e07>struct</span> netif_port <span style=color:#719e07>*</span>dev, <span style=color:#dc322f>lcoreid_t</span> cid,
+</span></span><span style=display:flex><span>     <span style=color:#586e75>/* reuse mbuf.packet_type, it was RTE_PTYPE_XXX */</span>
+</span></span><span style=display:flex><span>     mbuf<span style=color:#719e07>-&gt;</span>packet_type <span style=color:#719e07>=</span> <span style=color:#268bd2>eth_type_parse</span>(eth_hdr, dev);
+</span></span><span style=display:flex><span> 
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#dc322f>int</span> redirected <span style=color:#719e07>=</span> <span style=color:#2aa198>0</span>;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    ret <span style=color:#719e07>=</span> <span style=color:#268bd2>cpu_fdir_redirect</span>(mbuf, <span style=color:#719e07>&amp;</span>redirected);
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    <span style=color:#719e07>if</span> (redirected) {
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>        <span style=color:#719e07>return</span> ret;
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>    }
+</span></span><span style=display:flex><span><span style=color:#719e07>+</span>
+</span></span><span style=display:flex><span>     <span style=color:#586e75>/*
+</span></span></span><span style=display:flex><span><span style=color:#586e75>      * In NETIF_PORT_FLAG_FORWARD2KNI mode.
+</span></span></span><span style=display:flex><span><span style=color:#586e75>      * All packets received are deep copied and sent to KNI
+</span></span></span><span style=display:flex><span><span style=color:#586e75>@@ -2569,6 +2576,11 @@ static void lcore_process_redirect_ring(lcoreid_t cid)
+</span></span></span><span style=display:flex><span><span style=color:#586e75>     dp_vs_redirect_ring_proc(cid);
+</span></span></span><span style=display:flex><span><span style=color:#586e75> }
+</span></span></span><span style=display:flex><span><span style=color:#586e75> 
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+static void lcore_process_fdir_ring(lcoreid_t cid)
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+{
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    cpu_fdir_ring_proc(cid);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+}
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+
+</span></span></span><span style=display:flex><span><span style=color:#586e75> static void lcore_job_recv_fwd(void *arg)
+</span></span></span><span style=display:flex><span><span style=color:#586e75> {
+</span></span></span><span style=display:flex><span><span style=color:#586e75>     int i, j;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>@@ -2588,6 +2600,7 @@ static void lcore_job_recv_fwd(void *arg)
+</span></span></span><span style=display:flex><span><span style=color:#586e75> 
+</span></span></span><span style=display:flex><span><span style=color:#586e75>             lcore_process_arp_ring(cid);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>             lcore_process_redirect_ring(cid);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            lcore_process_fdir_ring(cid);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>             qconf-&gt;len = netif_rx_burst(pid, qconf);
+</span></span></span><span style=display:flex><span><span style=color:#586e75> 
+</span></span></span><span style=display:flex><span><span style=color:#586e75>             lcore_stats_burst(&amp;lcore_stats[cid], qconf-&gt;len);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>diff --git a/tools/dpip/Makefile b/tools/dpip/Makefile
+</span></span></span><span style=display:flex><span><span style=color:#586e75>index e1bbe21e4390cde15d2e27a9d904756ade42afb0..b8771fb2123e358f872bca1bf61a7835fd10cb5c 100644
+</span></span></span><span style=display:flex><span><span style=color:#586e75>--- a/tools/dpip/Makefile
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+++ b/tools/dpip/Makefile
+</span></span></span><span style=display:flex><span><span style=color:#586e75>@@ -40,7 +40,7 @@ DEFS = -D DPVS_MAX_LCORE=64 -D DPIP_VERSION=\&#34;$(VERSION_STRING)\&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75> CFLAGS += $(DEFS)
+</span></span></span><span style=display:flex><span><span style=color:#586e75> 
+</span></span></span><span style=display:flex><span><span style=color:#586e75> OBJS = ipset.o dpip.o utils.o route.o addr.o neigh.o link.o vlan.o \
+</span></span></span><span style=display:flex><span><span style=color:#586e75>-	   qsch.o cls.o tunnel.o ipset.o ipv6.o iftraf.o eal_mem.o flow.o \
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+	   qsch.o cls.o tunnel.o ipset.o ipv6.o iftraf.o eal_mem.o flow.o fdir.o\
+</span></span></span><span style=display:flex><span><span style=color:#586e75> 	   ../../src/common.o ../keepalived/keepalived/check/sockopt.o
+</span></span></span><span style=display:flex><span><span style=color:#586e75> 
+</span></span></span><span style=display:flex><span><span style=color:#586e75> all: $(TARGET)
+</span></span></span><span style=display:flex><span><span style=color:#586e75>diff --git a/tools/dpip/dpip.c b/tools/dpip/dpip.c
+</span></span></span><span style=display:flex><span><span style=color:#586e75>index 596a534f54c9b185d69f5f72c80271ae9ec3f587..069215e4a203d5bb69ded33d47b33a2ef4157646 100644
+</span></span></span><span style=display:flex><span><span style=color:#586e75>--- a/tools/dpip/dpip.c
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+++ b/tools/dpip/dpip.c
+</span></span></span><span style=display:flex><span><span style=color:#586e75>@@ -35,7 +35,7 @@ static void usage(void)
+</span></span></span><span style=display:flex><span><span style=color:#586e75>         &#34;    &#34;DPIP_NAME&#34; [OPTIONS] OBJECT { COMMAND | help }\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>         &#34;Parameters:\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>         &#34;    OBJECT  := { link | addr | route | neigh | vlan | tunnel | qsch | cls |\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>-        &#34;                 ipv6 | iftraf | eal-mem | ipset | flow }\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        &#34;                 ipv6 | iftraf | eal-mem | ipset | flow | fdir }\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>         &#34;    COMMAND := { create | destroy | add | del | show (list) | set (change) |\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>         &#34;                 replace | flush | test | enable | disable }\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>         &#34;Options:\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>diff --git a/tools/dpip/fdir.c b/tools/dpip/fdir.c
+</span></span></span><span style=display:flex><span><span style=color:#586e75>new file mode 100644
+</span></span></span><span style=display:flex><span><span style=color:#586e75>index 0000000000000000000000000000000000000000..be10b921f5f4b36462ea9ba19879507e00262f23
+</span></span></span><span style=display:flex><span><span style=color:#586e75>--- /dev/null
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+++ b/tools/dpip/fdir.c
+</span></span></span><span style=display:flex><span><span style=color:#586e75>@@ -0,0 +1,144 @@
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+#include &lt;stdlib.h&gt;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+#include &#34;sockopt.h&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+#include &#34;dpip.h&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+#include &#34;conf/common.h&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+#include &#34;conf/cpu_fdir.h&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+static void fdir_help(void)
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+{
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    fprintf(stderr,
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        &#34;Usage:\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        &#34;    dpip fdir { show | help }\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        &#34;    dpip fdir { add | del } RULE\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        &#34;Parameters:\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        &#34;    RULE       := cid CID daddr DADDR dp_from DPORT_FROM dp_to DPORT_TO proto PROTO\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        &#34;    CID        := { NUM }\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        &#34;    SADDR      := { ip/plen }\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        &#34;    DADDR      := { ip/plen }\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        &#34;    SPORT_FROM := { NUM }\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        &#34;    SPORT_TO   := { NUM }\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        &#34;    DPORT_FROM := { NUM }\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        &#34;    DPORT_TO   := { NUM }\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        &#34;    PROTO      := { 6 | 17 | 1 }\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        &#34;Examples:\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        &#34;    dpip fdir show\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        &#34;    dpip fdir add cid 5 daddr 172.0.0.0/16 dp_from 1000 dp_to 2000 proto 6\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        &#34;    dpip fdir del daddr 172.0.0.0/16 dp_from 1000 dp_to 2000 proto 6\n&#34;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        );
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+}
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+static void fdir_dump(struct cpu_fdir_conf *rule)
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+{
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    char dst[64], src[64];
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    printf(&#34;cid %u dst %s/%d dport %u-%u proto %d\n&#34;,
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            rule-&gt;cid,
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            inet_ntop(AF_INET, &amp;rule-&gt;daddr, dst, sizeof(dst)) ? dst : &#34;::&#34;,
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            rule-&gt;d_plen,
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            ntohs(rule-&gt;dport_from),
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            ntohs(rule-&gt;dport_to),
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            rule-&gt;proto);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    return;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+}
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+static int fdir_parse_args(struct dpip_conf *conf,
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+                            struct cpu_fdir_conf *rule)
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+{
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    char *addr, *plen;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    union inet_addr tmp;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    memset(rule, 0, sizeof(*rule));
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    while (conf-&gt;argc &gt; 0) {
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        if (strcmp(conf-&gt;argv[0], &#34;cid&#34;) == 0) {
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            NEXTARG_CHECK(conf, &#34;cid&#34;);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            rule-&gt;cid = atoi(conf-&gt;argv[0]);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        } else if (strcmp(conf-&gt;argv[0], &#34;daddr&#34;) == 0) {
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            NEXTARG_CHECK(conf, &#34;daddr&#34;);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            addr = conf-&gt;argv[0];
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            if ((plen = strchr(addr, &#39;/&#39;)) != NULL)
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+                *plen++ = &#39;\0&#39;;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            int af = AF_INET;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            if (inet_pton_try(&amp;af, addr, &amp;tmp) &lt;= 0)
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+                return -1;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            rule-&gt;daddr = tmp.in.s_addr;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            rule-&gt;d_plen = plen ? atoi(plen) : 0;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        } else if (strcmp(conf-&gt;argv[0], &#34;dp_from&#34;) == 0) {
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            NEXTARG_CHECK(conf, &#34;dp_from&#34;);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            rule-&gt;dport_from = atoi(conf-&gt;argv[0]);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        } else if (strcmp(conf-&gt;argv[0], &#34;dp_to&#34;) == 0) {
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            NEXTARG_CHECK(conf, &#34;dp_to&#34;);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            rule-&gt;dport_to = atoi(conf-&gt;argv[0]);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        } else if (strcmp(conf-&gt;argv[0], &#34;proto&#34;) == 0) {
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            NEXTARG_CHECK(conf, &#34;proto&#34;);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            rule-&gt;proto = atoi(conf-&gt;argv[0]);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        }
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        NEXTARG(conf);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    }
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    if (conf-&gt;argc &gt; 0) {
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        fprintf(stderr, &#34;too many arguments\n&#34;);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        return -1;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    }
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    return 0;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+}
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+static int fdir_do_cmd(struct dpip_obj *obj, dpip_cmd_t cmd,
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+                        struct dpip_conf *conf)
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+{
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    struct cpu_fdir_conf rule;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    struct cpu_fdir_conf_array *array;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    size_t size, i;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    int err;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    if (fdir_parse_args(conf, &amp;rule) != 0)
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        return EDPVS_INVAL;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    switch (conf-&gt;cmd) {
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        case DPIP_CMD_ADD:
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            return dpvs_setsockopt(SOCKOPT_SET_FDIR_ADD, &amp;rule, sizeof(rule));
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        case DPIP_CMD_DEL:
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            return dpvs_setsockopt(SOCKOPT_SET_FDIR_DEL, &amp;rule, sizeof(rule));
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        case DPIP_CMD_SHOW:
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            err = dpvs_getsockopt(SOCKOPT_GET_FDIR_SHOW, &amp;rule, sizeof(rule),
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+                        (void **)&amp;array, &amp;size);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            if (err != 0)
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+                return err;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            if (size &lt; sizeof(*array)
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+                || size != sizeof(*array) + \
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+                           array-&gt;nrule * sizeof(struct cpu_fdir_conf)) {
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+                fprintf(stderr, &#34;corrupted response.\n&#34;);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+                dpvs_sockopt_msg_free(array);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+                return EDPVS_INVAL;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            }
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            for (i = 0; i &lt; array-&gt;nrule; i++) {
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+                fdir_dump(&amp;array-&gt;rules[i]);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            }
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+                
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            dpvs_sockopt_msg_free(array);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            return EDPVS_OK;
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+        default:
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+            return EDPVS_NOTSUPP;  
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    }
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+}
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+struct dpip_obj dpip_fdir = {
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    .name   = &#34;fdir&#34;,
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    .help   = fdir_help,
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    .do_cmd = fdir_do_cmd,
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+};
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+static void __init fdir_init(void)
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+{
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    dpip_register_obj(&amp;dpip_fdir);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+}
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+static void __exit fdir_exit(void)
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+{
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+    dpip_unregister_obj(&amp;dpip_fdir);
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+}
+</span></span></span><span style=display:flex><span><span style=color:#586e75>+
+</span></span></span></code></pre></div></div><footer><p class=meta><span class="byline author vcard">Posted by <span class=fn>windseek</span></span>
+<time>May 30, 2025</time>
+<span class=categories>Tags:
+<a class=category href=https://scottlx.github.io/tags/dpdk>dpdk</a> <a class=category href=https://scottlx.github.io/tags/dpvs>dpvs</a> <a class=category href=https://scottlx.github.io/tags/%e9%ab%98%e6%80%a7%e8%83%bd%e7%bd%91%e7%bb%9c>高性能网络</a></span></p><p class=meta><a class="basic-alignment left" href=https://scottlx.github.io/posts/bpftrace/ title=bpftrace注入kfunc>bpftrace注入kfunc</a></p><div id=disqus_thread></div><script type=application/javascript>window.disqus_config=function(){},function(){if(["localhost","127.0.0.1"].indexOf(window.location.hostname)!=-1){document.getElementById("disqus_thread").innerHTML="Disqus comments not available by default when the website is previewed locally.";return}var t=document,e=t.createElement("script");e.async=!0,e.src="//scottlx.disqus.com/embed.js",e.setAttribute("data-timestamp",+new Date),(t.head||t.body).appendChild(e)}()</script><noscript>Please enable JavaScript to view the <a href=https://disqus.com/?ref_noscript>comments powered by Disqus.</a></noscript><a href=https://disqus.com class=dsq-brlink>comments powered by <span class=logo-disqus>Disqus</span></a></footer></article></div><aside class="sidebar thirds"><section class="first odd"><h1>Who am I</h1><p><p>云原生网络开发 &ndash;> 高级网管(笑</p><p>golang、云计算、SDN、NFV、软件架构</p><p>记录一些工作上的笔记，主要是以太网数据面开发（包括不限于dpdk，ebpf，ovs，dpvs，vpp&mldr;)以及k8s</p><p>也会记录一些web3方面的学习探索</p></p></section><ul class=sidebar-nav><li class=sidebar-nav-item><a target=_blank rel="noopener noreferrer" href=https://github.com/scottlx title=https://github.com/scottlx><i class="fa fa-github fa-3x"></i></a>
+<a target=_blank rel="noopener noreferrer" href="https://www.facebook.com/profile.php?id=100009824623685" title="https://www.facebook.com/profile.php?id=100009824623685"><i class="fa fa-facebook fa-3x"></i></a></li></ul><section class=odd></section><section class=even><h1>Recent Posts</h1><ul id=recent_posts></ul></section></aside></div></div><footer role=contentinfo><p>Copyright &copy; 2025 windseek - <a href=https://scottlx.github.io/license/>License</a> -
+<span class=credit>Powered by <a target=_blank href=https://gohugo.io rel="noopener noreferrer">Hugo</a> and <a target=_blank href=https://github.com/parsiya/hugo-octopress/ rel="noopener noreferrer">Hugo-Octopress</a> theme.</p></footer></body></html>
