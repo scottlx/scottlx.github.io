@@ -10,9 +10,7 @@ categories: ["技术介绍"]
 categoryes_weight: 96
 ---
 
-
-
-#### 数据亲和性
+### 数据亲和性
 
 如图所示，dpvs 机器有两块网卡，nic1 是 wan 外网网卡, nic0 是 lan 内网网卡。 当 client 发送 packet 时，网卡一般由 rss 来选择数据发送到哪个队列，一般这个队列都会绑定到某个核心 lcore.。rss 一般根据四元组<dport, dip, sport, sip>来分配网卡队列。但是，当 packet 由 rs 返回 dpvs 时，如果还是根据四元组来做 rss, 那么得到的队列必然无法对应到正确的 lcore. 这就会引起流表数据 miss, 如果再从其它 lcore 查表，必然会引起共享数据加锁，和 cpu cache 失效问题。
 
@@ -30,23 +28,24 @@ dpvs在新建一条conn时会从lcore所关联的port池里选择sport，从而�
 
 
 
-#### nfv化问题
+### nfv化问题
 
 对于云上虚拟机 virtio 等没有硬件卸载能力，但有用户态网卡驱动的网卡，需要通过软件来实现上述fdir功能
 
 
 
-##### 基本思路
+#### 基本思路
 
 在`netif_deliver_mbuf`处，也就是进入dpvs单核处理流程之前，进行一次cpu导流。
 
 cpu两两之间预先分配好导流用的ring buffer，报文经过parser解析后，根据规则进行精确匹配。若匹配到fidr规则，则按照规则指定的cid转移报文到指定的cpu ring buffer
 
 lcore job增加一个处理fdir ring的job ：lcore_process_fdir_ring`（类似process_arp_ring）
-![cpu_fdir](/img/dpvs/cpu_fdir.png)
+![cpu_fdir](/img/dpvs/cpu_fidr.png)
 
 
-##### patch
+#### patch
+基于dpvs commit 6ddc860a2f15c96b6141c2c2be1595ee72965d11
 
 ```c
 diff --git a/config.mk b/config.mk
