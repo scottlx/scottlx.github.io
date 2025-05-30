@@ -55,7 +55,7 @@ controller之间通信通过eventqueue进行异步解耦。每个evq对应一个
 
 #### endpoint manager的架构图
 
-![cilium agent](/img/blobs/cilium agent.png)
+![cilium_agent](/img/blobs/cilium_agent.png)
 
 > 说明
 
