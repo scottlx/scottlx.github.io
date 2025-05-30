@@ -1,5 +1,26 @@
 <!doctype html><html xmlns=http://www.w3.org/1999/xhtml xml:lang=en lang=en-us><head><meta charset=utf-8><meta name=viewport content="width=device-width,minimum-scale=1,maximum-scale=1"><link href=/css/fonts.css rel=stylesheet type=text/css><title>windseek</title><link rel=stylesheet href=/css/hugo-octopress.css><link rel=stylesheet href=/css/fork-awesome.min.css><link href=https://scottlx.github.io/favicon.png rel=icon><link href=/index.xml rel=alternate type=application/rss+xml title=windseek><meta name=description content><meta name=keywords content><meta name=author content="windseek"><meta name=generator content="Hugo 0.119.0"></head><body><header role=banner><hgroup><h1><a href=https://scottlx.github.io/>windseek</a></h1><h2>be curious, be free</h2></hgroup></header><nav role=navigation><fieldset class=mobile-nav><select onchange="location=this.value"><option value>Navigate…</option><option value=https://scottlx.github.io/>» Blog</option><option value=https://scottlx.github.io/archives/>» Archives</option><option value=https://scottlx.github.io/cheatsheet/>» CheatSheet</option><option value=https://scottlx.github.io/about/>» Aboutme</option></select></fieldset><ul class=main-navigation><li><a href=https://scottlx.github.io/ title=Blog>Blog</a></li><li><a href=https://scottlx.github.io/archives/ title=Archives target=_blank rel="noopener noreferrer">Archives</a></li><li><a href=https://scottlx.github.io/cheatsheet/ title=CheatSheet target=_blank rel="noopener noreferrer">CheatSheet</a></li><li><a href=https://scottlx.github.io/about/ title=Aboutme target=_blank rel="noopener noreferrer">Aboutme</a></li></ul><ul class=subscription></ul><form action=https://www.google.com/search method=get target=_blank rel="noopener noreferrer"><fieldset role=search><input class=search type=text name=q results=0 placeholder=Search>
-<input type=hidden name=q value=site:https://scottlx.github.io/></fieldset></form></nav><div id=main><div id=content><div class=blog-index><article><header><p class=meta>Mar 20, 2023
+<input type=hidden name=q value=site:https://scottlx.github.io/></fieldset></form></nav><div id=main><div id=content><div class=blog-index><article><header><p class=meta>Apr 7, 2023
+- 1 minute read
+- <a href=https://scottlx.github.io/posts/contiv-memif/#disqus_thread>Comments</a>
+- <a class=label href=https://scottlx.github.io/categories/%e6%8a%80%e6%9c%af%e4%bb%8b%e7%bb%8d/>技术介绍</a></p><h1 class=entry-title><a href=https://scottlx.github.io/posts/contiv-memif/>contiv memif</a></h1></header><p>contiv memif contiv的cni与device plugin相结合，实现了：
+Pod能同时接入不止一张网卡 Pod接入的网卡可以是tap，veth，memif devicePlugin Device Plugin实际是一个运行在Kubelet所在的Node上的gRPC server，通过Unix Socket、基于以下（简化的）API来和Kubelet的gRPC server通信，并维护对应设备资源在当前Node上的注册、发现、分配、卸载。 其中，ListAndWatch()负责对应设备资源的discovery和watch；Allocate()负责设备资源的分配。
+Insight kubelet kubelet接收上图格式的API。API中的annotations定义了pod的网卡个数与类型，resources中定义了所需要的device plugin的资源，也就是memif。
+kubelet执行常规的syncPod流程，调用contiv cni创建网络。此时会在请求中将annotation传递给cni。
+同时，agent的DevicePluginServer会向kubelet注册rpc服务，注册contivpp.io/memif的设备资源，从而kubelet的device manager会grpc请求DevicePluginServer获取contivpp.io/memif设备资源。
+cni cni实现了github.com/containernetworking/cni标准的add和del接口。实际上做的事情只是将cni请求转换为了对agent的grpc请求：解析args，并通过grpc调用agent的接口发送cniRequest，再根据grpc的返回结果，将结果再次转换成标准cni接口的返回格式
+Agent podmanager podmanager实现了上述cni调用的grpc server，主要任务是将cni的request转换为内部的event数据格式，供event loop处理。
+request是cni定义的请求数据类型，详见https://github.com/containernetworking/cni/blob/master/SPEC.md#parameters
+event则是agent内部的关于pod事务模型，类似原生kvScheduler的针对vpp api的transaction。每一种event都会对应一个plugin去实现他的handler，供event loop调用。
+event loop event loop是整个contiv agent的核心处理逻辑，北向对接event queue，南向调用各个EventHandler，将event转换为kvScheduler的事务。
+执行了以下步骤：
+对事件的预处理，包括校验，判断事件类型，加载必要的配置等 判断是否是更新的事件 对事件的handler进行排序，并生成正向或回退的handler顺序 与本次事件无关的handler过滤掉 创建对这次事件的记录record 打印上述步骤生成的所有事件相关信息 执行事件更新或同步，生成vpp-agent里的事务 将contiv生成的配置与外部配置进行merge，得到最终配置 将最终配置的vpp-agent事务commit到agent的kvscheduler 若事务失败，将已经完成的操作进行回退 完成事件，输出记录record与计时 打印回退失败等不可恢复的异常 若开启一致性检查，则最好再执行一次同步校验 devicemanager devicemanager既实现了对接kublet的DevicePluginServer，又实现了AllocateDevice类型的event的handler。换句话说是自己产生并处理自己的event。
+主要业务逻辑：
+创建memif socket文件的目录并挂载至容器
+创建连接socket的secret。
+上述的创建并不是真实的创建，而是把需要的信息(event.Envs, event.Annotations, event.Mounts)通过grpc返回给kublet，让kubelet去创建。
+devicemanager还会将上述memif的信息保存在缓存中，供其他插件来获取。若缓存中信息不存在，则会调用kubelet的api获取信息。
+ipNet ipNet插件主要负责node和pod中各类网卡的创建销毁，vxlan的分配，vrf的分配等
+更新网卡时，ipnet会读取annotation中kv，判断网卡类型。若类型为memif，则会向deviceManager获取当前pod里各容器的memifInfo，之后根据memifInfo里的socket地址和secret，创建memif类型的网卡事务，并 push 至kvscheduler</p></article><article><header><p class=meta>Mar 20, 2023
 - 2 minute read
 - <a href=https://scottlx.github.io/posts/%E6%95%B0%E4%BD%8Ddp/#disqus_thread>Comments</a>
 - <a class=label href=https://scottlx.github.io/categories/%e7%ae%97%e6%b3%95%e7%ac%94%e8%ae%b0/>算法笔记</a></p><h1 class=entry-title><a href=https://scottlx.github.io/posts/%E6%95%B0%E4%BD%8Ddp/>数位dp</a></h1></header><p>题目特征 要求统计满足一定条件的数的数量（即，最终目的为计数，若要结果则只能回溯爆搜得到）；
@@ -91,46 +112,7 @@ anetTcpConnect建立一个新的tcp连接 ping-pong命令测试连接 auth鉴权
 master与slave的同步存在数据不一致的时间窗口期 网络分区后哨兵模式或者集群模式的选主会产生脑裂 哨兵 多了一个哨兵节点进行主节点选举，触发从同步等工作，数据的同步还是主从模式 哨兵节点运行的是一个特殊模式的redis服务器，里面没有数据库。
 连接类型 命令连接
 订阅连接
-/*实例不是 Sentinel （主服务器或者从服务器） 并且以下条件的其中一个成立： 1）SENTINEL 未收到过这个服务器的 INFO 命令回复 2）距离上一次该实例回复 INFO 命令已经超过 info_period 间隔 那么向实例发送 INFO 命令 */ if ((ri->flags & SRI_SENTINEL) == 0 && ​ (ri->info_refresh == 0 || ​ (now - ri->info_refresh) > info_period)) { ​ /* Send INFO to masters and slaves, not sentinels.</p><footer><a href=https://scottlx.github.io/posts/redis%E5%A4%9A%E8%8A%82%E7%82%B9/ rel=full-article>继续阅读 →</a></footer></article><article><header><p class=meta>Oct 3, 2022
-- 1 minute read
-- <a href=https://scottlx.github.io/posts/redis%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84/#disqus_thread>Comments</a>
-- <a class=label href=https://scottlx.github.io/categories/%e6%8a%80%e6%9c%af%e4%bb%8b%e7%bb%8d/>技术介绍</a></p><h1 class=entry-title><a href=https://scottlx.github.io/posts/redis%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84/>redis 数据结构</a></h1></header><p>此系列作为redis设计与实现的笔记，会将本人自认为重点部分单独拎出来，并加入本人的一些理解。
-SDS （simple dynamic string）
-等同于go里的slice
-struct sdshdr { int len; int free; char buf[]; } 优点：
-杜绝缓冲区溢出（free检验） 减少修改字符串时的内存分配次数（策略：小于1MB时，len=free，大于1MB时，free=1MB） 惰性空间释放（删除时实际空间并未缩减） 二进制安全（C字符串视/0为结束，不能用来存带/0的二进制数据） 部分兼容C字符串函数（默认在char数组最后加入/0，来兼容C字符串函数） 链表 双向链表，无环，保存头指针和尾指针，保存链表长度字段，链表节点的数据为void*指针
-字典 字典有type，每个type实现了一系列操作kv的函数（对比，生成哈希，删除，复制等）
-每个字典存有两个哈希表，一般用第一个ht[0]，第二个ht[1]用作rehash时的暂存容器
-哈希表由数组实现，数组存放kv链表头节点，链地址法解决冲突，冲突的新键值往表头加（由于没有指向表尾的指针）
-rehash标志位，当没有进行rehash时为-1
-key&ndash;>(hashfunc)&ndash;>hash&ndash;>(hashmask)&ndash;>index
-murmurhash算法：输入有规律情况还是能生成随机分布性的hash
-rehash 为ht[1]哈希表分配空间，空间的大小取决于当前ht[0]包含的键值数量以及要进行的操作，重新计算所有键值在ht[1]的索引并插入，插入后将ht[1]设置为ht[0]，并ht[1]指向新创的空白hash表
-负载因子=ht[0].used/ht[0].size
-何时进行扩展? 在进行持久化操作时(BGSAVE,BGREWRITEAOF)，负载因子>=5，普通场景下负载因子>=1
-何时进行收缩? 负载因子&lt;0.1
-渐进式rehash 开始时rehashidx为0，表示正在进行rehash，rehash期间对字典的CRUD会顺带将ht[0]上的KV rehash到ht[1]，完成后rehashidx置为-1,表示已经完成。rehash期间的CRUD会先在ht[0]上查，查不到再去ht[1]查
-跳表 用来实现有序集合键，用作集群节点内部数据结构
-优点，相较于平衡树，实现简单，且rebalance的效率高（局部rebalance，只修改搜索路径上的节点）
-链表的扩展，维护了多个指向其他节点的指针，类似二分查找
-每个节点的层数是随机生成的，遍历时先走最上层的前进指针，若下一条节点的分值比要查找的分值高，则通过回退指针回到原来的节点并走下一层的前进指针，以此类推
-前进指针中存有跨度，累加所有跨度，当找到该节点后作为该节点在跳表中的排位（数组的index）
-比较分值时，分值可能相同，相同时比较value值（obj指向的sds的字典序）
-节点更新时，若score的改变未影响排序，则查找并直接改score，否则进行先删除后插入操作，会进行两次路径搜索
-整数集合 底层保存的整数为byte数组(int8)，按照解码类型(encoding)存入int16，int32或int64的数据
-只能存一种类型的数据，短int集合中插入长int后，往长int类型兼容（升级）
-节约内存，int16不需要分配int64的空间
-自适应灵活性，集合中添加长度更长的新元素，会自动升级，但不支持降级
-压缩列表 为了节约内存，将键值为小整数值和短字符串的entry按照特殊编排压缩为一段内存块
-先略过
-对象 创建键值对时，键和值都被封装成对象，并指明对象的类型，编码以及底层数据结构的指针
-key总是字符串对象，value可以是字符串对象，列表对象，哈希对象，集合对象，有序集合对象(zset)
-编码指定了底层数据结构, 每种对象类型有多种编码的实现
-字符串对象 long：value是数字，可以用long存
-raw：value是字符串，长度大于32byte，用sds存，sds的内存是另外一块，和redisObject不连续
-embstr：value是字符串，长度小于32byte，用sds存，sds的内存与redisObject的内存连续 （好处：减少分配和释放内存的次数，增加缓存命中率；坏处：没有实现写方法，只读，修改的话需要先转raw）
-列表对象 ziplist：redisObject的ptr指向压缩列表（条件：每个字符串长度&lt;64byte且列表长度&lt;512）
-linkedlist：构造元素为字符串对象的双向链表（列表对象中嵌套了字符串对象）</p><footer><a href=https://scottlx.github.io/posts/redis%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84/ rel=full-article>继续阅读 →</a></footer></article><div class=pagination><a href=/ aria-label=First class=label-pagination><i class="fa fa-angle-double-left fa-lg"></i></a>
+/*实例不是 Sentinel （主服务器或者从服务器） 并且以下条件的其中一个成立： 1）SENTINEL 未收到过这个服务器的 INFO 命令回复 2）距离上一次该实例回复 INFO 命令已经超过 info_period 间隔 那么向实例发送 INFO 命令 */ if ((ri->flags & SRI_SENTINEL) == 0 && ​ (ri->info_refresh == 0 || ​ (now - ri->info_refresh) > info_period)) { ​ /* Send INFO to masters and slaves, not sentinels.</p><footer><a href=https://scottlx.github.io/posts/redis%E5%A4%9A%E8%8A%82%E7%82%B9/ rel=full-article>继续阅读 →</a></footer></article><div class=pagination><a href=/ aria-label=First class=label-pagination><i class="fa fa-angle-double-left fa-lg"></i></a>
 <a href=/ aria-label=Previous class=label-pagination><i class="fa fa-angle-left fa-lg"></i></a>
 <a href=/ class=label-pagination>1</a>
 <a href=/page/2/ class=label-pagination>2</a>

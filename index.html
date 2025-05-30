@@ -1,5 +1,29 @@
 <!doctype html><html xmlns=http://www.w3.org/1999/xhtml xml:lang=en lang=en-us><head><meta charset=utf-8><meta name=viewport content="width=device-width,minimum-scale=1,maximum-scale=1"><link href=/css/fonts.css rel=stylesheet type=text/css><title>windseek</title><link rel=stylesheet href=/css/hugo-octopress.css><link rel=stylesheet href=/css/fork-awesome.min.css><link href=https://scottlx.github.io/favicon.png rel=icon><link href=/index.xml rel=alternate type=application/rss+xml title=windseek><meta name=description content><meta name=keywords content><meta name=author content="windseek"><meta name=generator content="Hugo 0.119.0"></head><body><header role=banner><hgroup><h1><a href=https://scottlx.github.io/>windseek</a></h1><h2>be curious, be free</h2></hgroup></header><nav role=navigation><fieldset class=mobile-nav><select onchange="location=this.value"><option value>Navigate…</option><option value=https://scottlx.github.io/>» Blog</option><option value=https://scottlx.github.io/archives/>» Archives</option><option value=https://scottlx.github.io/cheatsheet/>» CheatSheet</option><option value=https://scottlx.github.io/about/>» Aboutme</option></select></fieldset><ul class=main-navigation><li><a href=https://scottlx.github.io/ title=Blog>Blog</a></li><li><a href=https://scottlx.github.io/archives/ title=Archives target=_blank rel="noopener noreferrer">Archives</a></li><li><a href=https://scottlx.github.io/cheatsheet/ title=CheatSheet target=_blank rel="noopener noreferrer">CheatSheet</a></li><li><a href=https://scottlx.github.io/about/ title=Aboutme target=_blank rel="noopener noreferrer">Aboutme</a></li></ul><ul class=subscription></ul><form action=https://www.google.com/search method=get target=_blank rel="noopener noreferrer"><fieldset role=search><input class=search type=text name=q results=0 placeholder=Search>
-<input type=hidden name=q value=site:https://scottlx.github.io/></fieldset></form></nav><div id=main><div id=content><div class=blog-index><article><header><p class=meta>May 27, 2025
+<input type=hidden name=q value=site:https://scottlx.github.io/></fieldset></form></nav><div id=main><div id=content><div class=blog-index><article><header><p class=meta>May 30, 2025
+- 1 minute read
+- <a href=https://scottlx.github.io/posts/cilium-endpoint-%E5%88%9B%E5%BB%BA%E6%B5%81%E7%A8%8B/#disqus_thread>Comments</a>
+- <a class=label href=https://scottlx.github.io/categories/%e6%8a%80%e6%9c%af%e4%bb%8b%e7%bb%8d/>技术介绍</a></p><h1 class=entry-title><a href=https://scottlx.github.io/posts/cilium-endpoint-%E5%88%9B%E5%BB%BA%E6%B5%81%E7%A8%8B/>cilium endpoint 创建流程</a></h1></header><p>pod创建后，cilium打通网络涉及以下内容：
+lxc网卡的创建（cni插件） bpf代码的加载（agent） ipam 地址分配（agent） endpoint CR的创建（agent） endpoint生命周期管理（agent） 具体流程如下图
+流程说明
+cni add流程主要分三步：
+调用ipam接口从agent获取ip信息 创建lxc网卡（veth），根据ip信息配置网卡（mtu，gso，gro配置），容器命名空间内路由等 调用endpointCreate接口通知agent开始接管lxc网卡（加载bpf代码等） 如果启用了cniChaning，还会去执行chaining的动作
+ipam流程将在后期详细介绍，本篇主要分析endpointCreate之后的流程，也就是bpf代码是如何加载到lxc网卡上的。
+cilium controller cilium agent代码内部，对于资源同步的场景，设计了一套controller框架。
+controller可以理解为异步任务控制器，在后台尝试某一对象的同步任务直到成功，并记录成功失败次数，错误日志等监控数据。每个controller对应一个协程。
+controller需要被manager绑定，而manager则绑定到某一特定资源，比如endpoint
+由于资源的变配会需要多个异步任务的执行，因此一个manager可以关联多个controller，单个controller只负责某一特定的异步任务(只要是可能失败并需要重试的任务都适用，例如给k8s资源打annotation，同步对象到某个存储，kvstore，bpfmap等）
+controller之间通信通过eventqueue进行异步解耦。每个evq对应一个协程
+endpoint manager的架构图 ![cilium agent](/img/blobs/cilium agent.png)
+说明
+上图中，endpoint manager维护了本节点endpoint列表，并实现了
+gc controller：endpoint定期清理，清理不健康的endpoint。 regenerate controller：endpoint定期全量重建，重建ep对应的policy和configuration CNI创建endpoint后，endpoint对象会被创建。每个endpoint初始化时会有一个eventQueue和处理该eventQueue的一个controller。endpoint manager会将regen事件入队到endpoint的eventQueue中，并启动endpoint的sync Controller。sync Controller会同步ep信息到k8s cep CR，这样用户就可以从apiserver获取endpoint状态了
+ebpf程序加载流程 eventQueue中的regeneration event会触发endpoint的重建，也就是相关ebpf程序的编译加载和ebpf map数据的插入。
+bpf程序加载会发生在几种情况下：
+第一次创建时进行初始化 cilium重启时，会进行一次regenerate（按需初始化） 用户执行cilium endpoint regenerate 时（按需） 用户执行ciluim config时（按需） 程序是否加载由编译级别来控制
+0 -> “invalid” (未设置)
+1：RegenerateWithoutDatapath -> “no-rebuild” （更新policy，dns，只需更新map，不重新编译加载bpf）
+2：RegenerateWithDatapath -> &ldquo;rewrite+load&rdquo; （新创建endpoint）
+这边可能会有个疑问，为什么更新policy不是更新lxc代码。这是因为policy代码是在bpf_lxc的最后使用尾调用执行的。因此更新policy只要更新prog bpf，而不需要动已经加载在lxc上的代码</p><footer><a href=https://scottlx.github.io/posts/cilium-endpoint-%E5%88%9B%E5%BB%BA%E6%B5%81%E7%A8%8B/ rel=full-article>继续阅读 →</a></footer></article><article><header><p class=meta>May 27, 2025
 - 14 minute read
 - <a href=https://scottlx.github.io/posts/dpdk%E8%BD%AC%E5%8F%91%E9%9D%A2trace/#disqus_thread>Comments</a>
 - <a class=label href=https://scottlx.github.io/categories/%e6%8a%80%e6%9c%af%e4%bb%8b%e7%bb%8d/>技术介绍</a></p><h1 class=entry-title><a href=https://scottlx.github.io/posts/dpdk%E8%BD%AC%E5%8F%91%E9%9D%A2trace/>dpdk转发面trace</a></h1></header><p>上一期分析了ebpf转发面通过linux perf event的思路进行trace，这一期介绍一种dpdk程序的trace方法。基本原理大致相通，也是通过共享内存的方式进行数据传输。转发面代码和工具代码通过mmap共享一段内存，转发面产生数据，工具代码消费数据。
@@ -136,28 +160,7 @@ writer需要一直轮询reader的状态，看是否进入静默期。这样会�
 sz = rte_rcu_qsbr_get_memsize(RTE_MAX_LCORE); rv = (struct rte_rcu_qsbr *)rte_zmalloc(NULL, sz, RTE_CACHE_LINE_SIZE); 再初始化QS variable
 rte_rcu_qsbr_init(rv, RTE_MAX_LCORE); Reader注册自己的线程号，并上线（将自己加到writer的轮询队列里面） online时会原子读qsbr里的token，并设置到v->qsbr_cnt[thread_id].cnt中
 (void)rte_rcu_qsbr_thread_register(rv, lcore_id); rte_rcu_qsbr_thread_online(rv, lcore_id); 每次读取共享数据后，更新自己的静默状态（rte_rcu_qsbr_quiescent）
-do { for (i = 0; i &lt; num_keys; i += j) { for (j = 0; j &lt; QSBR_REPORTING_INTERVAL; j++) rte_hash_lookup(tbl_rwc_test_param.</p><footer><a href=https://scottlx.github.io/posts/dpdk-rcu/ rel=full-article>继续阅读 →</a></footer></article><article><header><p class=meta>Apr 7, 2023
-- 1 minute read
-- <a href=https://scottlx.github.io/posts/contiv-memif/#disqus_thread>Comments</a>
-- <a class=label href=https://scottlx.github.io/categories/%e6%8a%80%e6%9c%af%e4%bb%8b%e7%bb%8d/>技术介绍</a></p><h1 class=entry-title><a href=https://scottlx.github.io/posts/contiv-memif/>contiv memif</a></h1></header><p>contiv memif contiv的cni与device plugin相结合，实现了：
-Pod能同时接入不止一张网卡 Pod接入的网卡可以是tap，veth，memif devicePlugin Device Plugin实际是一个运行在Kubelet所在的Node上的gRPC server，通过Unix Socket、基于以下（简化的）API来和Kubelet的gRPC server通信，并维护对应设备资源在当前Node上的注册、发现、分配、卸载。 其中，ListAndWatch()负责对应设备资源的discovery和watch；Allocate()负责设备资源的分配。
-Insight kubelet kubelet接收上图格式的API。API中的annotations定义了pod的网卡个数与类型，resources中定义了所需要的device plugin的资源，也就是memif。
-kubelet执行常规的syncPod流程，调用contiv cni创建网络。此时会在请求中将annotation传递给cni。
-同时，agent的DevicePluginServer会向kubelet注册rpc服务，注册contivpp.io/memif的设备资源，从而kubelet的device manager会grpc请求DevicePluginServer获取contivpp.io/memif设备资源。
-cni cni实现了github.com/containernetworking/cni标准的add和del接口。实际上做的事情只是将cni请求转换为了对agent的grpc请求：解析args，并通过grpc调用agent的接口发送cniRequest，再根据grpc的返回结果，将结果再次转换成标准cni接口的返回格式
-Agent podmanager podmanager实现了上述cni调用的grpc server，主要任务是将cni的request转换为内部的event数据格式，供event loop处理。
-request是cni定义的请求数据类型，详见https://github.com/containernetworking/cni/blob/master/SPEC.md#parameters
-event则是agent内部的关于pod事务模型，类似原生kvScheduler的针对vpp api的transaction。每一种event都会对应一个plugin去实现他的handler，供event loop调用。
-event loop event loop是整个contiv agent的核心处理逻辑，北向对接event queue，南向调用各个EventHandler，将event转换为kvScheduler的事务。
-执行了以下步骤：
-对事件的预处理，包括校验，判断事件类型，加载必要的配置等 判断是否是更新的事件 对事件的handler进行排序，并生成正向或回退的handler顺序 与本次事件无关的handler过滤掉 创建对这次事件的记录record 打印上述步骤生成的所有事件相关信息 执行事件更新或同步，生成vpp-agent里的事务 将contiv生成的配置与外部配置进行merge，得到最终配置 将最终配置的vpp-agent事务commit到agent的kvscheduler 若事务失败，将已经完成的操作进行回退 完成事件，输出记录record与计时 打印回退失败等不可恢复的异常 若开启一致性检查，则最好再执行一次同步校验 devicemanager devicemanager既实现了对接kublet的DevicePluginServer，又实现了AllocateDevice类型的event的handler。换句话说是自己产生并处理自己的event。
-主要业务逻辑：
-创建memif socket文件的目录并挂载至容器
-创建连接socket的secret。
-上述的创建并不是真实的创建，而是把需要的信息(event.Envs, event.Annotations, event.Mounts)通过grpc返回给kublet，让kubelet去创建。
-devicemanager还会将上述memif的信息保存在缓存中，供其他插件来获取。若缓存中信息不存在，则会调用kubelet的api获取信息。
-ipNet ipNet插件主要负责node和pod中各类网卡的创建销毁，vxlan的分配，vrf的分配等
-更新网卡时，ipnet会读取annotation中kv，判断网卡类型。若类型为memif，则会向deviceManager获取当前pod里各容器的memifInfo，之后根据memifInfo里的socket地址和secret，创建memif类型的网卡事务，并 push 至kvscheduler</p></article><div class=pagination><a href=/ aria-label=First class=label-pagination><i class="fa fa-angle-double-left fa-lg"></i></a>
+do { for (i = 0; i &lt; num_keys; i += j) { for (j = 0; j &lt; QSBR_REPORTING_INTERVAL; j++) rte_hash_lookup(tbl_rwc_test_param.</p><footer><a href=https://scottlx.github.io/posts/dpdk-rcu/ rel=full-article>继续阅读 →</a></footer></article><div class=pagination><a href=/ aria-label=First class=label-pagination><i class="fa fa-angle-double-left fa-lg"></i></a>
 <a href=/ class=label-pagination>1</a>
 <a href=/page/2/ class=label-pagination>2</a>
 <a href=/page/3/ class=label-pagination>3</a>

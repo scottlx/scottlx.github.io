@@ -1,4 +1,25 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>技术介绍 on windseek</title><link>https://scottlx.github.io/categories/%E6%8A%80%E6%9C%AF%E4%BB%8B%E7%BB%8D/</link><description>Recent content in 技术介绍 on windseek</description><generator>Hugo -- gohugo.io</generator><language>zh-CN</language><lastBuildDate>Tue, 27 May 2025 15:54:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/categories/%E6%8A%80%E6%9C%AF%E4%BB%8B%E7%BB%8D/index.xml" rel="self" type="application/rss+xml"/><item><title>dpdk转发面trace</title><link>https://scottlx.github.io/posts/dpdk%E8%BD%AC%E5%8F%91%E9%9D%A2trace/</link><pubDate>Tue, 27 May 2025 15:54:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpdk%E8%BD%AC%E5%8F%91%E9%9D%A2trace/</guid><description>上一期分析了ebpf转发面通过linux perf event的思路进行trace，这一期介绍一种dpdk程序的trace方法。基本原理大致相通，也是通过共享内存的方式进行数据传输。转发面代码和工具代码通过mmap共享一段内存，转发面产生数据，工具代码消费数据。
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>技术介绍 on windseek</title><link>https://scottlx.github.io/categories/%E6%8A%80%E6%9C%AF%E4%BB%8B%E7%BB%8D/</link><description>Recent content in 技术介绍 on windseek</description><generator>Hugo -- gohugo.io</generator><language>zh-CN</language><lastBuildDate>Fri, 30 May 2025 10:15:00 +0800</lastBuildDate><atom:link href="https://scottlx.github.io/categories/%E6%8A%80%E6%9C%AF%E4%BB%8B%E7%BB%8D/index.xml" rel="self" type="application/rss+xml"/><item><title>cilium endpoint 创建流程</title><link>https://scottlx.github.io/posts/cilium-endpoint-%E5%88%9B%E5%BB%BA%E6%B5%81%E7%A8%8B/</link><pubDate>Fri, 30 May 2025 10:15:00 +0800</pubDate><guid>https://scottlx.github.io/posts/cilium-endpoint-%E5%88%9B%E5%BB%BA%E6%B5%81%E7%A8%8B/</guid><description>pod创建后，cilium打通网络涉及以下内容：
+lxc网卡的创建（cni插件） bpf代码的加载（agent） ipam 地址分配（agent） endpoint CR的创建（agent） endpoint生命周期管理（agent） 具体流程如下图
+流程说明
+cni add流程主要分三步：
+调用ipam接口从agent获取ip信息 创建lxc网卡（veth），根据ip信息配置网卡（mtu，gso，gro配置），容器命名空间内路由等 调用endpointCreate接口通知agent开始接管lxc网卡（加载bpf代码等） 如果启用了cniChaning，还会去执行chaining的动作
+ipam流程将在后期详细介绍，本篇主要分析endpointCreate之后的流程，也就是bpf代码是如何加载到lxc网卡上的。
+cilium controller cilium agent代码内部，对于资源同步的场景，设计了一套controller框架。
+controller可以理解为异步任务控制器，在后台尝试某一对象的同步任务直到成功，并记录成功失败次数，错误日志等监控数据。每个controller对应一个协程。
+controller需要被manager绑定，而manager则绑定到某一特定资源，比如endpoint
+由于资源的变配会需要多个异步任务的执行，因此一个manager可以关联多个controller，单个controller只负责某一特定的异步任务(只要是可能失败并需要重试的任务都适用，例如给k8s资源打annotation，同步对象到某个存储，kvstore，bpfmap等）
+controller之间通信通过eventqueue进行异步解耦。每个evq对应一个协程
+endpoint manager的架构图 ![cilium agent](/img/blobs/cilium agent.png)
+说明
+上图中，endpoint manager维护了本节点endpoint列表，并实现了
+gc controller：endpoint定期清理，清理不健康的endpoint。 regenerate controller：endpoint定期全量重建，重建ep对应的policy和configuration CNI创建endpoint后，endpoint对象会被创建。每个endpoint初始化时会有一个eventQueue和处理该eventQueue的一个controller。endpoint manager会将regen事件入队到endpoint的eventQueue中，并启动endpoint的sync Controller。sync Controller会同步ep信息到k8s cep CR，这样用户就可以从apiserver获取endpoint状态了
+ebpf程序加载流程 eventQueue中的regeneration event会触发endpoint的重建，也就是相关ebpf程序的编译加载和ebpf map数据的插入。
+bpf程序加载会发生在几种情况下：
+第一次创建时进行初始化 cilium重启时，会进行一次regenerate（按需初始化） 用户执行cilium endpoint regenerate 时（按需） 用户执行ciluim config时（按需） 程序是否加载由编译级别来控制
+0 -&amp;gt; “invalid” (未设置)
+1：RegenerateWithoutDatapath -&amp;gt; “no-rebuild” （更新policy，dns，只需更新map，不重新编译加载bpf）
+2：RegenerateWithDatapath -&amp;gt; &amp;ldquo;rewrite+load&amp;rdquo; （新创建endpoint）
+这边可能会有个疑问，为什么更新policy不是更新lxc代码。这是因为policy代码是在bpf_lxc的最后使用尾调用执行的。因此更新policy只要更新prog bpf，而不需要动已经加载在lxc上的代码</description></item><item><title>dpdk转发面trace</title><link>https://scottlx.github.io/posts/dpdk%E8%BD%AC%E5%8F%91%E9%9D%A2trace/</link><pubDate>Tue, 27 May 2025 15:54:00 +0800</pubDate><guid>https://scottlx.github.io/posts/dpdk%E8%BD%AC%E5%8F%91%E9%9D%A2trace/</guid><description>上一期分析了ebpf转发面通过linux perf event的思路进行trace，这一期介绍一种dpdk程序的trace方法。基本原理大致相通，也是通过共享内存的方式进行数据传输。转发面代码和工具代码通过mmap共享一段内存，转发面产生数据，工具代码消费数据。
 共享内存buffer 由于大部分dpdk程序是run to completion模型，一个lcore对应一个网卡队列，报文尽可能不要在cpu之间来回切换，而是由单个cpu处理完所有逻辑之后发送。因此，相对应的，我们的buffer要为每一个cpu都分配一个ring
 extern struct trace_buffer *g_trace; typedef OBJ_RING(struct trace_record, 1 &amp;lt;&amp;lt; 11) __rte_cache_aligned trace_ring_t; struct trace_buffer { trace_ring_t percpu[16]; int enabled; uint8_t ports[MAX_PORT][NR_TRACE_ON]; }; ring buffer 常规做法是使用dpdk lib的rte_ring，但是该ring的实现比较复杂，且很多功能我们不会用到。因此下面介绍一个简易的ring实现，相比dpdk rte_ring，内存占用较少，逻辑简单。
 核心思路
