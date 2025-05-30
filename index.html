@@ -13,8 +13,7 @@ controller可以理解为异步任务控制器，在后台尝试某一对象的�
 controller需要被manager绑定，而manager则绑定到某一特定资源，比如endpoint
 由于资源的变配会需要多个异步任务的执行，因此一个manager可以关联多个controller，单个controller只负责某一特定的异步任务(只要是可能失败并需要重试的任务都适用，例如给k8s资源打annotation，同步对象到某个存储，kvstore，bpfmap等）
 controller之间通信通过eventqueue进行异步解耦。每个evq对应一个协程
-endpoint manager的架构图 ![cilium agent](/img/blobs/cilium agent.png)
-说明
+endpoint manager的架构图 说明
 上图中，endpoint manager维护了本节点endpoint列表，并实现了
 gc controller：endpoint定期清理，清理不健康的endpoint。 regenerate controller：endpoint定期全量重建，重建ep对应的policy和configuration CNI创建endpoint后，endpoint对象会被创建。每个endpoint初始化时会有一个eventQueue和处理该eventQueue的一个controller。endpoint manager会将regen事件入队到endpoint的eventQueue中，并启动endpoint的sync Controller。sync Controller会同步ep信息到k8s cep CR，这样用户就可以从apiserver获取endpoint状态了
 ebpf程序加载流程 eventQueue中的regeneration event会触发endpoint的重建，也就是相关ebpf程序的编译加载和ebpf map数据的插入。
@@ -23,7 +22,8 @@ bpf程序加载会发生在几种情况下：
 0 -> “invalid” (未设置)
 1：RegenerateWithoutDatapath -> “no-rebuild” （更新policy，dns，只需更新map，不重新编译加载bpf）
 2：RegenerateWithDatapath -> &ldquo;rewrite+load&rdquo; （新创建endpoint）
-这边可能会有个疑问，为什么更新policy不是更新lxc代码。这是因为policy代码是在bpf_lxc的最后使用尾调用执行的。因此更新policy只要更新prog bpf，而不需要动已经加载在lxc上的代码</p><footer><a href=https://scottlx.github.io/posts/cilium-endpoint-%E5%88%9B%E5%BB%BA%E6%B5%81%E7%A8%8B/ rel=full-article>继续阅读 →</a></footer></article><article><header><p class=meta>May 27, 2025
+这边可能会有个疑问，为什么更新policy不是更新lxc代码。这是因为policy代码是在bpf_lxc的最后使用尾调用执行的。因此更新policy只要更新prog bpf，而不需要动已经加载在lxc上的代码
+static __always_inline int l3_local_delivery(struct __ctx_buff *ctx, __u32 seclabel, __u32 magic __maybe_unused, const struct endpoint_info *ep __maybe_unused, __u8 direction __maybe_unused, bool from_host __maybe_unused, bool from_tunnel __maybe_unused, __u32 cluster_id __maybe_unused) { /*省略一些代码*/ /* Jumps to destination pod's BPF program to enforce ingress policies.</p><footer><a href=https://scottlx.github.io/posts/cilium-endpoint-%E5%88%9B%E5%BB%BA%E6%B5%81%E7%A8%8B/ rel=full-article>继续阅读 →</a></footer></article><article><header><p class=meta>May 27, 2025
 - 14 minute read
 - <a href=https://scottlx.github.io/posts/dpdk%E8%BD%AC%E5%8F%91%E9%9D%A2trace/#disqus_thread>Comments</a>
 - <a class=label href=https://scottlx.github.io/categories/%e6%8a%80%e6%9c%af%e4%bb%8b%e7%bb%8d/>技术介绍</a></p><h1 class=entry-title><a href=https://scottlx.github.io/posts/dpdk%E8%BD%AC%E5%8F%91%E9%9D%A2trace/>dpdk转发面trace</a></h1></header><p>上一期分析了ebpf转发面通过linux perf event的思路进行trace，这一期介绍一种dpdk程序的trace方法。基本原理大致相通，也是通过共享内存的方式进行数据传输。转发面代码和工具代码通过mmap共享一段内存，转发面产生数据，工具代码消费数据。
