@@ -16,13 +16,13 @@ categoryes_weight: 96
 
 如图所示，dpvs 机器有两块网卡，nic1 是 wan 外网网卡, nic0 是 lan 内网网卡。 当 client 发送 packet 时，网卡一般由 rss 来选择数据发送到哪个队列，一般这个队列都会绑定到某个核心 lcore.。rss 一般根据四元组<dport, dip, sport, sip>来分配网卡队列。但是，当 packet 由 rs 返回 dpvs 时，如果还是根据四元组来做 rss, 那么得到的队列必然无法对应到正确的 lcore. 这就会引起流表数据 miss, 如果再从其它 lcore 查表，必然会引起共享数据加锁，和 cpu cache 失效问题。
 
-![dpvs亲和性](D:\Users\linxun2\Desktop\dpvs亲和性.webp)
+![dpvs亲和性](/img/dpvs/dpvs亲和性.webp)
 
 dpvs提出的解决方案是flow director（fdir）。当server回包数据进入网卡后不再采用四元组+rss去计算队列，而是根据数据的dport将数据精确分配到预定队列。如下图所示，本地可用端口，根据 cpu 个数做掩码。将端口固定到某个 lcore。举个例子，如果网卡有 16 个队列，那么就配置 16 个 cpu, 掩码是 0x0F, 端口根据掩码取余，就会对应到指定的队列和cpu。
 
 dpvs在新建一条conn时会从lcore所关联的port池里选择sport，从而实现了同一对数据包被同一个lcore处理。
 
-![dpvs_fdir](D:\Users\linxun2\Desktop\dpvs_fdir.webp)
+![dpvs_fdir](/img/dpvs/dpvs_fdir.webp)
 
 实际上，fdir是dpdk提供的api，支持多层协议堆叠的flow规则配置，用户可以基于proto、ip、port等信息随意定制自己的flow。根据硬件选型，lb物理机所采用的网卡是NVIDIA Mellanox ConnectX-6，支持L2-L4的fdir规则定制，因此lb的fdir规则考虑采用geneve封装的outer ip 作为flow的匹配条件，因为我们的lip是per core的，实现便捷，同时可以避免端口抢占。
 
