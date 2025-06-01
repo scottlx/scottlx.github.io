@@ -6,7 +6,7 @@ tags: ["ebpf", "linux"]
 tags_weight: 66
 series: ["ebpf系列"]
 series_weight: 96
-categories: ["技术介绍"]
+categories: ["操作指南"]
 categoryes_weight: 96
 ---
 
