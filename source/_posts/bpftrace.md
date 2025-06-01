@@ -2,7 +2,7 @@
 title: "bpftrace注入kfunc"
 date: 2025-05-30T13:53:00+08:00
 draft: false
-tags: ["ebpf","linux"]
+tags: ["ebpf", "linux"]
 tags_weight: 66
 series: ["ebpf系列"]
 series_weight: 96
@@ -10,6 +10,7 @@ categories: ["技术介绍"]
 categoryes_weight: 96
 ---
 
+<!-- more -->
 
 ### 四种探针类型
 
@@ -23,18 +24,18 @@ categoryes_weight: 96
   - **稳定性**：内核函数可能随版本变化，导致跟踪点失效。
 - **用途**：调试、性能分析、动态跟踪未预设的事件。
 
-------
+---
 
 #### **kfunc**
 
-- **定义**：eBPF程序可调用的**内核函数**，由内核显式导出供安全调用。
+- **定义**：eBPF 程序可调用的**内核函数**，由内核显式导出供安全调用。
 - 特点：
-  - **安全性**：仅允许调用内核标记为`BTF_ID`的特定函数（通过BPF Type Format, BTF）。
-  - **性能**：直接调用内核函数，比eBPF Helper更高效。
-  - **依赖eBPF**：需通过eBPF验证器确保安全性。
-- **用途**：允许eBPF程序安全访问内核内部数据结构或功能（如操作链表、修改特定字段）。
+  - **安全性**：仅允许调用内核标记为`BTF_ID`的特定函数（通过 BPF Type Format, BTF）。
+  - **性能**：直接调用内核函数，比 eBPF Helper 更高效。
+  - **依赖 eBPF**：需通过 eBPF 验证器确保安全性。
+- **用途**：允许 eBPF 程序安全访问内核内部数据结构或功能（如操作链表、修改特定字段）。
 
-------
+---
 
 #### **tracepoint**
 
@@ -43,42 +44,36 @@ categoryes_weight: 96
   - **静态性**：需内核开发者预先定义，位置和参数格式固定。
   - **稳定性**：接口向后兼容，适合生产环境。
   - **结构化数据**：参数以明确结构体传递（如`trace_sched_switch`）。
-  - **低开销**：相比kprobe，性能影响较小。
+  - **低开销**：相比 kprobe，性能影响较小。
 - **用途**：监控系统调用、调度事件等预定义内核事件。
 
-------
+---
 
 #### ** rawtracepoint**
 
-- **定义**：直接访问tracepoint的**原始参数**，跳过内核封装层。
+- **定义**：直接访问 tracepoint 的**原始参数**，跳过内核封装层。
 - 特点：
   - **底层访问**：直接读取寄存器或原始参数，无需解析结构体。
-  - **性能优势**：比常规tracepoint更高效（减少封装开销）。
+  - **性能优势**：比常规 tracepoint 更高效（减少封装开销）。
   - **不稳定性**：参数格式可能随内核变化，需手动适配。
-  - **依赖eBPF**：常用于eBPF程序（如`BPF_PROG_TYPE_RAW_TRACEPOINT`类型）。
+  - **依赖 eBPF**：常用于 eBPF 程序（如`BPF_PROG_TYPE_RAW_TRACEPOINT`类型）。
 - **用途**：需要极致性能的场景（如高频事件跟踪），同时接受潜在兼容性风险。
 
-
-
-### btf支持
+### btf 支持
 
 [BPF 类型格式 (BTF) — Linux 内核文档 - Linux 内核](https://linuxkernel.org.cn/doc/html/latest/bpf/btf.html)
 
-系统若有btf支持，结构体格式就可以通过btf传给工具，用户无需去查阅内核源码
+系统若有 btf 支持，结构体格式就可以通过 btf 传给工具，用户无需去查阅内核源码
 
 ```shell
 sudo bpftrace --info |& grep -i btf
 ```
 
-
-
 ### kfunc probe
 
-调试ebpf代码时，遇到icmp request接收了，但是内核协议栈不返回icmp reply
+调试 ebpf 代码时，遇到 icmp request 接收了，但是内核协议栈不返回 icmp reply
 
 下面给出上述问题的排查思路
-
-
 
 查看`/proc/net/snmp`发现有**InHdrErrors**
 
@@ -88,11 +83,9 @@ sudo bpftrace --info |& grep -i btf
 netstat -s
 ```
 
-发现Ip协议栈有invalid headers的报错
+发现 Ip 协议栈有 invalid headers 的报错
 
-
-
-查看icmp_开头的kfunc点
+查看 icmp\_开头的 kfunc 点
 
 ```shell
 bpftrace -lv 'kfunc:icmp_*'
@@ -114,7 +107,7 @@ kfunc:icmp_reply
 ...
 ```
 
-查看sock结构体定义
+查看 sock 结构体定义
 
 ```shell
 sudo bpftrace -lv 'struct sk_buff'
@@ -154,20 +147,16 @@ struct sk_buff {
 ...
 ```
 
-
-
-查看icmp_rcv是否触发，直接打印skb
+查看 icmp_rcv 是否触发，直接打印 skb
 
 ```shell
 bpftrace -e 'kfunc:icmp_rcv{print(*args->skb)}'
 ```
 
- 
-
-编写打桩脚本，过滤异常报文(ip_header不合法的报文)
+编写打桩脚本，过滤异常报文(ip_header 不合法的报文)
 
 ```shell
-vi ip_rcv_core.bt 
+vi ip_rcv_core.bt
 ```
 
 ```c
@@ -182,7 +171,7 @@ kfunc:ip_rcv_core {
 
   $iph = (struct iphdr *)$skb->data;
 
- 
+
   if ($iph->ihl < 5 || $iph->version !=4) {
      print(*$iph);
   }
@@ -190,7 +179,7 @@ kfunc:ip_rcv_core {
 }
 ```
 
- 执行trace
+执行 trace
 
 ```shell
 bpftrace -e ip_rcv_core.bt
@@ -198,13 +187,9 @@ bpftrace -e ip_rcv_core.bt
 
 发现有不合法报文，并可以打印出字节，发现是以太头
 
+最后发现三层 tunnel 设备的 ebpf 代码中，如果直接将以太报文 redirect 给二层设备是不可行的。
 
-
-最后发现三层tunnel设备的ebpf代码中，如果直接将以太报文redirect给二层设备是不可行的。
-
-三层tunnel设备需要发送报文给二层设备，需要时raw ip报文才可被正常接收
-
-
+三层 tunnel 设备需要发送报文给二层设备，需要时 raw ip 报文才可被正常接收
 
 ```c
 // 三层tunnel设备redirect给二层设备时，不走二层协议栈，直接进入ip协议栈。
@@ -251,11 +236,6 @@ static struct sk_buff *ip_rcv_core(struct sk_buff *skb, struct net *net)
 	if (iph->ihl < 5 || iph->version != 4)
 		goto inhdr_error;  // 丢包处
 ```
-
-
-
-
-
 
 > 参考
 

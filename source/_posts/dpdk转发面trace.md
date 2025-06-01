@@ -10,14 +10,15 @@ categories: ["技术介绍"]
 categoryes_weight: 96
 ---
 
+<!-- more -->
 
-上一期分析了ebpf转发面通过linux perf event的思路进行trace，这一期介绍一种dpdk程序的trace方法。基本原理大致相通，也是通过共享内存的方式进行数据传输。转发面代码和工具代码通过mmap共享一段内存，转发面产生数据，工具代码消费数据。
+上一期分析了 ebpf 转发面通过 linux perf event 的思路进行 trace，这一期介绍一种 dpdk 程序的 trace 方法。基本原理大致相通，也是通过共享内存的方式进行数据传输。转发面代码和工具代码通过 mmap 共享一段内存，转发面产生数据，工具代码消费数据。
 
 ![ptrace原理](/img/blobs/ptrace原理.png)
 
-### 共享内存buffer
+### 共享内存 buffer
 
-由于大部分dpdk程序是run to completion模型，一个lcore对应一个网卡队列，报文尽可能不要在cpu之间来回切换，而是由单个cpu处理完所有逻辑之后发送。因此，相对应的，我们的buffer要为每一个cpu都分配一个ring
+由于大部分 dpdk 程序是 run to completion 模型，一个 lcore 对应一个网卡队列，报文尽可能不要在 cpu 之间来回切换，而是由单个 cpu 处理完所有逻辑之后发送。因此，相对应的，我们的 buffer 要为每一个 cpu 都分配一个 ring
 
 ```c
 extern struct trace_buffer *g_trace;
@@ -31,17 +32,15 @@ struct trace_buffer {
 };
 ```
 
-
-
 ### ring buffer
 
-常规做法是使用dpdk lib的rte_ring，但是该ring的实现比较复杂，且很多功能我们不会用到。因此下面介绍一个简易的ring实现，相比dpdk rte_ring，内存占用较少，逻辑简单。
+常规做法是使用 dpdk lib 的 rte_ring，但是该 ring 的实现比较复杂，且很多功能我们不会用到。因此下面介绍一个简易的 ring 实现，相比 dpdk rte_ring，内存占用较少，逻辑简单。
 
 核心思路
 
 - 使用内存屏障`rte_smp_wmb()/rte_smp_rmb()`替代锁，保证线程安全
-- 使用prepare，commit两段式提交，确保数据一致性
-- 使用mask位运算代替取模获取索引，提升查找效率
+- 使用 prepare，commit 两段式提交，确保数据一致性
+- 使用 mask 位运算代替取模获取索引，提升查找效率
 
 具体实现代码如下
 
@@ -98,8 +97,6 @@ struct trace_buffer {
 
 ```
 
-
-
 使用方式
 
 ```c
@@ -117,26 +114,22 @@ obj_ring_write_commit(ring);
     next_seq++;         // 递增序列号提交写入
 ```
 
-
-
 ### data in memory file
 
-转发面的表项mmap到文件，之后用工具读取文件并解析，是dpdk转发面开发中很常见的场景，比如路由表，邻居表的dump。
+转发面的表项 mmap 到文件，之后用工具读取文件并解析，是 dpdk 转发面开发中很常见的场景，比如路由表，邻居表的 dump。
 
-相较于用unix socket传输，直接读取内存文件不会有速率的限制，且实现起来比较简单。
+相较于用 unix socket 传输，直接读取内存文件不会有速率的限制，且实现起来比较简单。
 
-另一个优点是表项文件可以保留在主机上，当进程发生异常重启时，初始化阶段可以通过内存文件restore所有表项。
+另一个优点是表项文件可以保留在主机上，当进程发生异常重启时，初始化阶段可以通过内存文件 restore 所有表项。
 
-但是trade off是要处理好并发读写的问题。
+但是 trade off 是要处理好并发读写的问题。
 
-
-
-我们可以定义一种通用的header带在数据前面方便我们解析
+我们可以定义一种通用的 header 带在数据前面方便我们解析
 
 - magic：魔术字，进行解析之前校验该特征
 - version: 版本，预留
 - data_size: data[]部分的长度
-- file_size：包含header的整个内存文件的大小，按page size取整
+- file_size：包含 header 的整个内存文件的大小，按 page size 取整
 - type: 定义文件时只读还是可写
 
 ```c
@@ -156,9 +149,7 @@ struct dmf_header {
 
 ```
 
-
-
-创建dmf映射时，我们可以定义一种通用的spec
+创建 dmf 映射时，我们可以定义一种通用的 spec
 
 ```c
 struct dmf_spec {
@@ -176,7 +167,7 @@ struct dmf_spec {
 };
 ```
 
-使用时指定好spec就可以进行内存文件映射
+使用时指定好 spec 就可以进行内存文件映射
 
 ```c
 static struct dmf_spec dmf_specs[] = {
@@ -189,13 +180,11 @@ void mvs_dp_dmf_map_all(int readonly)
 }
 ```
 
+dmf_map 流程
 
-
-dmf_map流程
-
-1. 寻找文件路径，若文件存在，mmap整个文件到spec->addr
-2. 若文件不存在，创建文件再mmap
-3. 检查header的格式，若不合法，reset data
+1. 寻找文件路径，若文件存在，mmap 整个文件到 spec->addr
+2. 若文件不存在，创建文件再 mmap
+3. 检查 header 的格式，若不合法，reset data
 
 ```c
 void *dmf_map_by_spec(struct dmf_spec *spec, const char *name, int readonly)
@@ -470,11 +459,9 @@ static inline int dmf_need_reset(struct dmf_header *hdr, struct dmf_spec *spec)
 }
 ```
 
-
-
 ### trace record
 
-一条trace_record需要记录了一条流的完整信， 包括rx和tx时的skb信息，cpu id，经过的所有trace points以及必要的info
+一条 trace_record 需要记录了一条流的完整信， 包括 rx 和 tx 时的 skb 信息，cpu id，经过的所有 trace points 以及必要的 info
 
 ```c
 /* trace的skb只记录必要的header信息*/
@@ -521,9 +508,7 @@ struct trace_record {
 
 ```
 
-
-
-### trace语法
+### trace 语法
 
 下面是一个典型使用样例
 
@@ -545,8 +530,8 @@ packet tx
 
 - trace_begin
 
-  - 初始化trace_record
-  - 拷贝ingress时的skb
+  - 初始化 trace_record
+  - 拷贝 ingress 时的 skb
 
   ```c
   static inline struct trace_record *
@@ -557,18 +542,18 @@ packet tx
       trace_ring_t *ring;
       trace_filter_t trace_filter = g_trace_filter;
       int tid;
-  
+
       if (unlikely(trace_filter && trace_filter(skb, ctx, has_eth_hdr) != 0)) {
           return NULL;
       }
-  
+
       tid = pal_thread_id();
-  
+
       ring = get_trace_ring(tid);
       if (unlikely(ring == NULL)) {
           return NULL;
       }
-  
+
       record = obj_ring_write_prepare(ring);
       record->rx_tsc = pal_thread_conf(tid)->start_cycle;
       record->flags = 0;
@@ -576,30 +561,28 @@ packet tx
       record->nr_point = 0;
       record->skbinfo.tcp_state = 0;
       record->skbinfo.ct_id = OBJ_ID_NULL;
-  
+
       record->skbs[0].pkt_len = 0;
       record->skbs[1].pkt_len = 0;
-  
+
       if (trace_enabled(skb->recv_if, TRACE_ON_POINTS)) {
           trace_add_point(record, ctx, 0);
       }
-  
+
       if (trace_enabled(skb->recv_if, TRACE_ON_RX)) {
           trace_set_skb(record, skb, 0, has_eth_hdr);
           trace_set_skbinfo(&record->skbinfo, NULL);
       }
-  
+
       skb->trace = record;
-  
+
       return record;
   }
   ```
 
-  
-
 - trace_point
 
-  - 为trace_record的points增加一个观测点
+  - 为 trace_record 的 points 增加一个观测点
 
     ```c
     static inline void
@@ -611,34 +594,32 @@ packet tx
     }
     ```
 
-    
-
 - trace_error
 
-  - 为trace_record的points增加一个带错误码的观测点
+  - 为 trace_record 的 points 增加一个带错误码的观测点
 
 - trace_end
 
-  - 增加end观测点
+  - 增加 end 观测点
 
-  - 将record写到cpu对应的ring
+  - 将 record 写到 cpu 对应的 ring
 
     ```c
     static inline void
     trace_end(struct trace_record *record, int err)
     {
         trace_ring_t *ring;
-    
+
         if (!record) {
             return;
         }
-    
+
         if (record->skbs[0].pkt_len == 0 && record->skbs[1].pkt_len == 0) {
             return;
         }
-    
+
         trace_point(record, TRACE_POINT_end, err);
-    
+
         ring = get_trace_ring(record->tid);
         if (ring) {
             obj_ring_write_commit(ring);
@@ -646,36 +627,32 @@ packet tx
     }
     ```
 
-    
-
 - trace_send
 
   - 增加一个观测点
-  - 拷贝egress时的skb
+  - 拷贝 egress 时的 skb
 
   ```c
   static inline void
   trace_send(struct sk_buff *skb, int ctx)
   {
       struct trace_record *record = skb->trace;
-  
+
       trace_point(record, ctx, 0);
-  
+
       if (trace_enabled(skb->send_if, TRACE_ON_TX)) {
           trace_set_skb(record, skb, 1, 1);  // trace tx
       }
   }
   ```
 
-
-
 ### trace_reader
 
-reader打开内存文件读取record，每一个ring相应的需要创建对应的cache。
+reader 打开内存文件读取 record，每一个 ring 相应的需要创建对应的 cache。
 
-由于dump打印到标准输出的速度较慢，大流量场景下，cache可能会被打满，因此需要read和lost统计
+由于 dump 打印到标准输出的速度较慢，大流量场景下，cache 可能会被打满，因此需要 read 和 lost 统计
 
-按照trace_option对trace_record进行过滤
+按照 trace_option 对 trace_record 进行过滤
 
 ```c
 struct trace_reader {
@@ -689,9 +666,7 @@ struct trace_reader {
 };
 ```
 
-
-
-record解析流程
+record 解析流程
 
 ```c
 
@@ -1202,4 +1177,3 @@ struct trace_record *trace_read(struct trace_reader *reader)
 
 
 ```
-

@@ -2,7 +2,7 @@
 title: "nfv化dpvs的cpu fdir"
 date: 2025-05-30T14:54:00+08:00
 draft: false
-tags: ["dpdk","dpvs","高性能网络"]
+tags: ["dpdk", "dpvs", "高性能网络"]
 tags_weight: 66
 series: ["dpvs系列"]
 series_weight: 96
@@ -10,42 +10,40 @@ categories: ["技术介绍"]
 categoryes_weight: 96
 ---
 
+<!-- more -->
+
 ### 数据亲和性
 
 如图所示，dpvs 机器有两块网卡，nic1 是 wan 外网网卡, nic0 是 lan 内网网卡。 当 client 发送 packet 时，网卡一般由 rss 来选择数据发送到哪个队列，一般这个队列都会绑定到某个核心 lcore.。rss 一般根据四元组<dport, dip, sport, sip>来分配网卡队列。但是，当 packet 由 rs 返回 dpvs 时，如果还是根据四元组来做 rss, 那么得到的队列必然无法对应到正确的 lcore. 这就会引起流表数据 miss, 如果再从其它 lcore 查表，必然会引起共享数据加锁，和 cpu cache 失效问题。
 
 ![dpvs亲和性](/img/dpvs/dpvs亲和性.webp)
 
-dpvs提出的解决方案是flow director（fdir）。当server回包数据进入网卡后不再采用四元组+rss去计算队列，而是根据数据的dport将数据精确分配到预定队列。如下图所示，本地可用端口，根据 cpu 个数做掩码。将端口固定到某个 lcore。举个例子，如果网卡有 16 个队列，那么就配置 16 个 cpu, 掩码是 0x0F, 端口根据掩码取余，就会对应到指定的队列和cpu。
+dpvs 提出的解决方案是 flow director（fdir）。当 server 回包数据进入网卡后不再采用四元组+rss 去计算队列，而是根据数据的 dport 将数据精确分配到预定队列。如下图所示，本地可用端口，根据 cpu 个数做掩码。将端口固定到某个 lcore。举个例子，如果网卡有 16 个队列，那么就配置 16 个 cpu, 掩码是 0x0F, 端口根据掩码取余，就会对应到指定的队列和 cpu。
 
-dpvs在新建一条conn时会从lcore所关联的port池里选择sport，从而实现了同一对数据包被同一个lcore处理。
+dpvs 在新建一条 conn 时会从 lcore 所关联的 port 池里选择 sport，从而实现了同一对数据包被同一个 lcore 处理。
 
 ![dpvs_fdir](/img/dpvs/dpvs_fdir.webp)
 
-实际上，fdir是dpdk提供的api，支持多层协议堆叠的flow规则配置，用户可以基于proto、ip、port等信息随意定制自己的flow。根据硬件选型，lb物理机所采用的网卡是NVIDIA Mellanox ConnectX-6，支持L2-L4的fdir规则定制，因此lb的fdir规则考虑采用geneve封装的outer ip 作为flow的匹配条件，因为我们的lip是per core的，实现便捷，同时可以避免端口抢占。
+实际上，fdir 是 dpdk 提供的 api，支持多层协议堆叠的 flow 规则配置，用户可以基于 proto、ip、port 等信息随意定制自己的 flow。根据硬件选型，lb 物理机所采用的网卡是 NVIDIA Mellanox ConnectX-6，支持 L2-L4 的 fdir 规则定制，因此 lb 的 fdir 规则考虑采用 geneve 封装的 outer ip 作为 flow 的匹配条件，因为我们的 lip 是 per core 的，实现便捷，同时可以避免端口抢占。
 
-检查网卡是否支持fdir：http://doc.dpdk.org/guides/nics/overview.html#id1
+检查网卡是否支持 fdir：http://doc.dpdk.org/guides/nics/overview.html#id1
 
+### nfv 化问题
 
-
-### nfv化问题
-
-对于云上虚拟机 virtio 等没有硬件卸载能力，但有用户态网卡驱动的网卡，需要通过软件来实现上述fdir功能
-
-
+对于云上虚拟机 virtio 等没有硬件卸载能力，但有用户态网卡驱动的网卡，需要通过软件来实现上述 fdir 功能
 
 #### 基本思路
 
-在`netif_deliver_mbuf`处，也就是进入dpvs单核处理流程之前，进行一次cpu导流。
+在`netif_deliver_mbuf`处，也就是进入 dpvs 单核处理流程之前，进行一次 cpu 导流。
 
-cpu两两之间预先分配好导流用的ring buffer，报文经过parser解析后，根据规则进行精确匹配。若匹配到fidr规则，则按照规则指定的cid转移报文到指定的cpu ring buffer
+cpu 两两之间预先分配好导流用的 ring buffer，报文经过 parser 解析后，根据规则进行精确匹配。若匹配到 fidr 规则，则按照规则指定的 cid 转移报文到指定的 cpu ring buffer
 
-lcore job增加一个处理fdir ring的job ：lcore_process_fdir_ring`（类似process_arp_ring）
+lcore job 增加一个处理 fdir ring 的 job ：lcore_process_fdir_ring`（类似 process_arp_ring）
 ![cpu_fdir](/img/dpvs/cpu_fidr.png)
 
-
 #### patch
-基于dpvs commit 6ddc860a2f15c96b6141c2c2be1595ee72965d11
+
+基于 dpvs commit 6ddc860a2f15c96b6141c2c2be1595ee72965d11
 
 ```c
 diff --git a/config.mk b/config.mk
@@ -54,7 +52,7 @@ index 91673dc93aff8fc47bcde6f275c439b44c5b8ef8..ff98d5c997a9207feb4e73e3e9ad899e
 +++ b/config.mk
 @@ -10,7 +10,7 @@ export CONFIG_PDUMP=y
  export CONFIG_ICMP_REDIRECT_CORE=n
- 
+
  # debugging and logging
 -export CONFIG_DEBUG=n
 +export CONFIG_DEBUG=y
@@ -102,7 +100,7 @@ index 2e3cd75950c4939a3c1e3f143fcfd26306dcfcbb..9e0bf0d764c973341c24a04ac6f5858c
 +    DPVSMSG(SOCKOPT_SET_FDIR_ADD)  \
 +    DPVSMSG(SOCKOPT_SET_FDIR_DEL)  \
 +    DPVSMSG(SOCKOPT_GET_FDIR_SHOW) \
- 
+
  typedef enum {
      DPVSMSG_SOCKOPT_ENUM(ENUM_ITEM)
 diff --git a/include/fdir/cpu_fdir.h b/include/fdir/cpu_fdir.h
@@ -177,10 +175,10 @@ index 0000000000000000000000000000000000000000..f793d952293ee8ca5790c90c509d8464
 +	 * mbuf.buf_addr = (void *)skb + sizeof(mbuf)
 +	 */
 +	union {
-+	    struct rte_ether_hdr    *outer_eth; 
++	    struct rte_ether_hdr    *outer_eth;
 +	    void    *outer_l2_hdr;
 +	}; /* ether header, or NULL if not set */
-+	
++
 +	union {
 +		struct rte_ipv4_hdr    *outer_iph;
 +		struct rte_arp_hdr    *outer_arph;
@@ -224,7 +222,7 @@ index 0000000000000000000000000000000000000000..f793d952293ee8ca5790c90c509d8464
 +	uint16_t outer_l2_len;
 +	uint16_t outer_l3_len;
 +	uint16_t outer_l4_len;
-+	
++
 +    uint8_t  tunnel_type;
 +	uint8_t  tunnel_flag;
 +    uint16_t  tunnel_len;
@@ -391,13 +389,13 @@ index 0000000000000000000000000000000000000000..3aef18a13dccb652210b8bad8de96b1c
 +        return EDPVS_INVPKT;
 +    }
 +
-+    struct cpu_fdir *r = cpu_fdir_get(pkt_info.l4_proto, 
++    struct cpu_fdir *r = cpu_fdir_get(pkt_info.l4_proto,
 +        iph->src_addr, iph->dst_addr, sport, dport);
 +    if (r) {
 +        cpu_fdir_redirect_pkt(mbuf, r->cid);
 +        *redirected = 1;
 +    }
-+    
++
 +    return EDPVS_OK;
 +}
 +
@@ -614,7 +612,7 @@ index 0000000000000000000000000000000000000000..3aef18a13dccb652210b8bad8de96b1c
 +
 +    if (!cf || size != sizeof(*conf))
 +        return EDPVS_INVAL;
-+    
++
 +
 +    uint32_t daddr_mask = htonl(0xFFFFFFFF << (32 - conf->d_plen));
 +
@@ -630,7 +628,7 @@ index 0000000000000000000000000000000000000000..3aef18a13dccb652210b8bad8de96b1c
 +        default:
 +            return EDPVS_NOTSUPP;
 +    }
-+    
++
 +    return EDPVS_NOTSUPP;
 +}
 +
@@ -697,7 +695,7 @@ index 0000000000000000000000000000000000000000..3aef18a13dccb652210b8bad8de96b1c
 +    if ((err = sockopt_register(&cpu_fdir_sockopts)) != EDPVS_OK) {
 +         return err;
 +    }
-+       
++
 +
 +    return cpu_fdir_table_create();
 +}
@@ -745,7 +743,7 @@ index 0000000000000000000000000000000000000000..8dc136ed2c5fed27d4aba1010acc0f79
 +    } else if (this_sk_info->l4_proto == IPPROTO_ICMP) {
 +		this_sk_info->icmph = (struct rte_icmp_hdr*)
 +			((char *)ipv4_hdr + this_sk_info->l3_len);
-+	} else 
++	} else
 +		this_sk_info->l4_len = 0;
 +}
 +
@@ -804,7 +802,7 @@ index 0000000000000000000000000000000000000000..8dc136ed2c5fed27d4aba1010acc0f79
 +	if (this_sk_info->udph->dst_port != _htons(RTE_GENEVE_DEFAULT_PORT)) {
 +		return;
 +	}
-+		
++
 +	genh = (struct rte_geneve_hdr *)((char *)this_sk_info->udph +
 +				sizeof(struct rte_udp_hdr));
 +    this_sk_info->genh = genh;
@@ -826,7 +824,7 @@ index 0000000000000000000000000000000000000000..8dc136ed2c5fed27d4aba1010acc0f79
 +	} else {
 +		return;
 +	}
-+		
++
 +	this_sk_info->recv_vni = genh->vni[0]<<16 | genh->vni[1]<<8 | genh->vni[2];
 +    this_sk_info->vni_flag = genh->reserved1 & 0x3f; // lower 6 bit
 +    /* l2_len must be set correctly for nic offload */
@@ -890,7 +888,7 @@ index 00ca8965593eaa41818d3158b3c670412505ff4e..93f49638213b7eb5341092c522d8a5cf
  #include "scheduler.h"
  #include "pdump.h"
 +#include "fdir/cpu_fdir.h"
- 
+
  #define DPVS    "dpvs"
  #define RTE_LOGTYPE_DPVS RTE_LOGTYPE_USER1
 @@ -107,6 +108,8 @@ static void inline dpdk_version_check(void)
@@ -917,7 +915,7 @@ index d2ae6cf91da116ee7ccb3981eb1d40122da33d6b..85b0a0f44e6f636dd4bc3444ecc5aa42
 @@ -2373,6 +2374,12 @@ static int netif_deliver_mbuf(struct netif_port *dev, lcoreid_t cid,
      /* reuse mbuf.packet_type, it was RTE_PTYPE_XXX */
      mbuf->packet_type = eth_type_parse(eth_hdr, dev);
- 
+
 +    int redirected = 0;
 +    ret = cpu_fdir_redirect(mbuf, &redirected);
 +    if (redirected) {
@@ -930,7 +928,7 @@ index d2ae6cf91da116ee7ccb3981eb1d40122da33d6b..85b0a0f44e6f636dd4bc3444ecc5aa42
 @@ -2569,6 +2576,11 @@ static void lcore_process_redirect_ring(lcoreid_t cid)
      dp_vs_redirect_ring_proc(cid);
  }
- 
+
 +static void lcore_process_fdir_ring(lcoreid_t cid)
 +{
 +    cpu_fdir_ring_proc(cid);
@@ -940,12 +938,12 @@ index d2ae6cf91da116ee7ccb3981eb1d40122da33d6b..85b0a0f44e6f636dd4bc3444ecc5aa42
  {
      int i, j;
 @@ -2588,6 +2600,7 @@ static void lcore_job_recv_fwd(void *arg)
- 
+
              lcore_process_arp_ring(cid);
              lcore_process_redirect_ring(cid);
 +            lcore_process_fdir_ring(cid);
              qconf->len = netif_rx_burst(pid, qconf);
- 
+
              lcore_stats_burst(&lcore_stats[cid], qconf->len);
 diff --git a/tools/dpip/Makefile b/tools/dpip/Makefile
 index e1bbe21e4390cde15d2e27a9d904756ade42afb0..b8771fb2123e358f872bca1bf61a7835fd10cb5c 100644
@@ -953,12 +951,12 @@ index e1bbe21e4390cde15d2e27a9d904756ade42afb0..b8771fb2123e358f872bca1bf61a7835
 +++ b/tools/dpip/Makefile
 @@ -40,7 +40,7 @@ DEFS = -D DPVS_MAX_LCORE=64 -D DPIP_VERSION=\"$(VERSION_STRING)\"
  CFLAGS += $(DEFS)
- 
+
  OBJS = ipset.o dpip.o utils.o route.o addr.o neigh.o link.o vlan.o \
 -	   qsch.o cls.o tunnel.o ipset.o ipv6.o iftraf.o eal_mem.o flow.o \
 +	   qsch.o cls.o tunnel.o ipset.o ipv6.o iftraf.o eal_mem.o flow.o fdir.o\
  	   ../../src/common.o ../keepalived/keepalived/check/sockopt.o
- 
+
  all: $(TARGET)
 diff --git a/tools/dpip/dpip.c b/tools/dpip/dpip.c
 index 596a534f54c9b185d69f5f72c80271ae9ec3f587..069215e4a203d5bb69ded33d47b33a2ef4157646 100644
@@ -1099,11 +1097,11 @@ index 0000000000000000000000000000000000000000..be10b921f5f4b36462ea9ba19879507e
 +            for (i = 0; i < array->nrule; i++) {
 +                fdir_dump(&array->rules[i]);
 +            }
-+                
++
 +            dpvs_sockopt_msg_free(array);
 +            return EDPVS_OK;
 +        default:
-+            return EDPVS_NOTSUPP;  
++            return EDPVS_NOTSUPP;
 +    }
 +}
 +
@@ -1125,4 +1123,3 @@ index 0000000000000000000000000000000000000000..be10b921f5f4b36462ea9ba19879507e
 +
 
 ```
-

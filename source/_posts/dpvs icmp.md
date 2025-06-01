@@ -2,7 +2,7 @@
 title: "dpvs icmp session"
 date: 2025-02-18T11:11:00+08:00
 draft: false
-tags: ["dpdk","dpvs","高性能网络"]
+tags: ["dpdk", "dpvs", "高性能网络"]
 tags_weight: 66
 series: ["dpvs系列"]
 series_weight: 96
@@ -10,131 +10,107 @@ categories: ["技术介绍"]
 categoryes_weight: 96
 ---
 
+<!-- more -->
 
-原生的ipvs仅处理三种类型的ICMP报文：ICMP_DEST_UNREACH、ICMP_SOURCE_QUENCH和ICMP_TIME_EXCEEDED
+原生的 ipvs 仅处理三种类型的 ICMP 报文：ICMP_DEST_UNREACH、ICMP_SOURCE_QUENCH 和 ICMP_TIME_EXCEEDED
 
-对于不是这三种类型的ICMP，则设置为不相关联(related)的ICMP，返回NF_ACCEPT，之后走本机路由流程
+对于不是这三种类型的 ICMP，则设置为不相关联(related)的 ICMP，返回 NF_ACCEPT，之后走本机路由流程
 
-dpvs对ipvs进行了一些修改，修改后逻辑如下
+dpvs 对 ipvs 进行了一些修改，修改后逻辑如下
 
+## icmp 差错报文流程
 
+- \_\_dp_vs_in
 
-## icmp差错报文流程
+- \_\_dp_vs_in_icmp4 （处理 icmp 差错报文，入参 related 表示找到了关联的 conn）
 
+  若不是 ICMP_DEST_UNREACH，ICMP_SOURCE_QUENCH，ICMP_TIME_EXCEEDED，返回到\_dp_vs_in 走普通 conn 命中流程
 
+  icmp 差错报文，需要将报文头偏移到 icmp 头内部的 ip 头，**根据内部 ip 头查找内部 ip 的 conn**。
 
-- __dp_vs_in
+  若找到 conn，**表明此 ICMP 报文是由之前客户端的请求报文所触发的，由真实服务器回复的 ICMP 报文**。将 related 置 1
 
-- __dp_vs_in_icmp4 （处理icmp差错报文，入参related表示找到了关联的conn）
+  若未找到则返回 accept，返回到\_dp_vs_in 走普通 conn 命中流程
 
-    若不是ICMP_DEST_UNREACH，ICMP_SOURCE_QUENCH，ICMP_TIME_EXCEEDED，返回到_dp_vs_in走普通conn命中流程
+  - ​ \_\_xmit_inbound_icmp4
 
-  icmp差错报文，需要将报文头偏移到icmp头内部的ip头，**根据内部ip头查找内部ip的conn**。
+  ​ 找 net 和 local 路由，之后走\_\_dp_vs_xmit_icmp4
 
-  若找到conn，**表明此ICMP报文是由之前客户端的请求报文所触发的，由真实服务器回复的ICMP报文**。将related置1
+  - \_\_dp_vs_xmit_icmp4
 
-   若未找到则返回accept，返回到_dp_vs_in走普通conn命中流程
-  - ​    __xmit_inbound_icmp4
+  ​ 数据区的前 8 个字节恰好覆盖了 TCP 报文或 UDP 报文中的端口号字段（前四个字节）
 
-  ​    找net和local路由，之后走__dp_vs_xmit_icmp4
+  inbound 方向根据内部 ip 的 conn 修改数据区目的端口为 conn->dport，源端口改为 conn->localport，
 
-  -  __dp_vs_xmit_icmp4
+  outbound 方向将目的端口改为 conn->cport，源端口改为 conn->vport
 
-  ​      数据区的前8个字节恰好覆盖了TCP报文或UDP报文中的端口号字段（前四个字节）
+  ​
 
-  inbound方向根据内部ip的conn修改数据区目的端口为conn->dport，源端口改为conn->localport，
+  client (cport ) <--> (vport)lb(lport) <--> rs(dport)
 
-  outbound方向将目的端口改为conn->cport，源端口改为conn->vport
-
-  ​       
-
-  client (cport )   <-->   (vport)lb(lport)   <-->    rs(dport)
-
-  ​      重新计算icmp头的checksum，走ipv4_output
-
+  ​ 重新计算 icmp 头的 checksum，走 ipv4_output
 
 ![报文格式](/img/dpvs/icmp差错报文.png)
 
 **实际应用上的问题**
 
-某个rs突然下线，导致有时访问vip轮询到了不可达的rs，rs侧的网关发送了一个dest_unreach的icmp包
+某个 rs 突然下线，导致有时访问 vip 轮询到了不可达的 rs，rs 侧的网关发送了一个 dest_unreach 的 icmp 包
 
-该rs的conn还未老化，__dp_vs_in_icmp4流程根据这个icmp的内部差错ip头找到了还未老化的conn，将icmp数据区的port进行修改发回给client
+该 rs 的 conn 还未老化，\_\_dp_vs_in_icmp4 流程根据这个 icmp 的内部差错 ip 头找到了还未老化的 conn，将 icmp 数据区的 port 进行修改发回给 client
 
-但是一般情况，rs下线后，该rs的conn会老化消失，内层conn未命中，还是走外层icmp的conn命中流程转给client。这样内部数据区的端口信息是错的（dport->lport，正确情况是vport->cport）
-
-
+但是一般情况，rs 下线后，该 rs 的 conn 会老化消失，内层 conn 未命中，还是走外层 icmp 的 conn 命中流程转给 client。这样内部数据区的端口信息是错的（dport->lport，正确情况是 vport->cport）
 
 ## 非差错报文流程
 
-返回_dp_vs_in走普通conn命中流程
+返回\_dp_vs_in 走普通 conn 命中流程
 
-
-
-原本dp_vs_conn_new流程中，先查找svc。icmp的svc默认使用端口0进行查找。但是ipvsadm命令却对端口0的service添加做了限制，导致无法添加这类svc。
+原本 dp_vs_conn_new 流程中，先查找 svc。icmp 的 svc 默认使用端口 0 进行查找。但是 ipvsadm 命令却对端口 0 的 service 添加做了限制，导致无法添加这类 svc。
 
 ```c
  svc = dp_vs_service_lookup(iph->af, iph->proto, &iph->daddr, 0, 0,                               mbuf, NULL, &outwall, rte_lcore_id());
 ```
 
-若未查到走INET_ACCEPT(也就是继续往下进行走到ipv4_output_fin2查到local路由，若使用dpip addr配上了vip或lip地址，则会触发本地代答)。
+若未查到走 INET_ACCEPT(也就是继续往下进行走到 ipv4_output_fin2 查到 local 路由，若使用 dpip addr 配上了 vip 或 lip 地址，则会触发本地代答)。
 
-若查到svc，则进行conn的schedule，之后会走dp_vs_laddr_bind，但是dp_vs_laddr_bind不支持icmp协议(可以整改)，最终导致svc可以查到但是conn无法建立，最后走INET_DROP。
+若查到 svc，则进行 conn 的 schedule，之后会走 dp_vs_laddr_bind，但是 dp_vs_laddr_bind 不支持 icmp 协议(可以整改)，最终导致 svc 可以查到但是 conn 无法建立，最后走 INET_DROP。
 
 概括一下：
 
-- - 未命中svc，走后续local route，最终本地代答
-  - 命中svc后若conn无法建立，drop
-  - 命中svc且建立conn，发往rs或client
+- - 未命中 svc，走后续 local route，最终本地代答
+  - 命中 svc 后若 conn 无法建立，drop
+  - 命中 svc 且建立 conn，发往 rs 或 client
 
+### icmp 的 conn
 
-
-### icmp的conn
-
-
-
-​        
+​
 
 ```c
 _ports[0] = icmp4_id(ich);
 _ports[1] = ich->type << 8 | ich->code;
 ```
 
+Inbound hash 和 outboundhash 的五元组都使用上述这两个 port 进行哈希，并与 conn 进行关联。
 
+具体的 laddr 和 lport 保存在 conn 里面。其中只用到 laddr 做 l3 的 fullnat。由于 icmp 协议没有定义 proto->fnat_in_handler，因此 fnat 时，从 sa_pool 分配到的 lport 对于 icmp 来说没有用。
 
-Inbound hash和outboundhash的五元组都使用上述这两个port进行哈希，并与conn进行关联。
+试想 ping request 和 ping reply 场景：
 
-具体的laddr和lport保存在conn里面。其中只用到laddr做l3的fullnat。由于icmp协议没有定义proto->fnat_in_handler，因此fnat时，从sa_pool分配到的lport对于icmp来说没有用。
+由于 request 和 reply 的 ich->type 不一样，outboundhash 必定不命中(且 fnat 流程中的 laddr_bind 还会修改一次 outboundhashtuple 的 dport，修改成 sapool 分配的 port，因此也不会命中 outbound hash)。
 
-
-
-试想ping request和ping reply场景：
-
-由于request和reply的ich->type不一样，outboundhash必定不命中(且fnat流程中的laddr_bind还会修改一次outboundhashtuple的dport，修改成sapool分配的port，因此也不会命中outbound hash)。
-
-**一次来回的ping会创建两个conn，且都只命中inboundhash。**
-
-
+**一次来回的 ping 会创建两个 conn，且都只命中 inboundhash。**
 
 ## 个人认为比较合理的方案
 
-
-
 #### ipvsadm
 
-放通port=0的svc的创建，用户需要fwd icmp to rs时，需要添加icmp类型的svc。否则icmp会被vip或者lip代答，不会透传到rs或client
+放通 port=0 的 svc 的创建，用户需要 fwd icmp to rs 时，需要添加 icmp 类型的 svc。否则 icmp 会被 vip 或者 lip 代答，不会透传到 rs 或 client
 
+#### icmp 差错报文
 
+保持原状，对找不到关联的 conn 连接的差错报文进行 drop。
 
-#### icmp差错报文
+但一般情况下若发生差错，关联的 conn 大概率已经老化，此时做 related 的处理意义不大
 
-保持原状，对找不到关联的conn连接的差错报文进行drop。
+#### icmp 查询报文
 
-但一般情况下若发生差错，关联的conn大概率已经老化，此时做related的处理意义不大
-
-
-
-#### icmp查询报文
-
-保持原状，建立icmp conn，来回创建两个conn。
-
+保持原状，建立 icmp conn，来回创建两个 conn。
