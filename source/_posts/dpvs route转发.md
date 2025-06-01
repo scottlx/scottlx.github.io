@@ -10,6 +10,8 @@ categories: ["技术介绍"]
 categoryes_weight: 96
 ---
 
+dpvs(类 ipvs)数据面流程
+
 <!-- more -->
 
 ipv4_rcv_fin 是路由转发逻辑， INET_HOOKPRE_ROUTING 中走完 hook 逻辑后，根据 dpvs 返回值走 ipv4_rcv_fin

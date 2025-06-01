@@ -10,6 +10,8 @@ categories: ["操作指南"]
 categoryes_weight: 96
 ---
 
+gobpf 编译
+
 <!-- more -->
 
 ### 编译过程

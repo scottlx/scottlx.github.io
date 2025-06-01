@@ -10,6 +10,8 @@ categories: ["技术介绍"]
 categoryes_weight: 96
 ---
 
+[Working with kernel probes | bpftrace](https://bpftrace.org/hol/kernel-probes) 笔记
+
 <!-- more -->
 
 ### 四种探针类型

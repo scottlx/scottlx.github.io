@@ -10,6 +10,8 @@ categories: ["技术介绍"]
 categoryes_weight: 96
 ---
 
+一种报文 trace 写法
+
 <!-- more -->
 
 上一期分析了 ebpf 转发面通过 linux perf event 的思路进行 trace，这一期介绍一种 dpdk 程序的 trace 方法。基本原理大致相通，也是通过共享内存的方式进行数据传输。转发面代码和工具代码通过 mmap 共享一段内存，转发面产生数据，工具代码消费数据。

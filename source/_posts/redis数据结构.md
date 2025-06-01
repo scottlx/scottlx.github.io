@@ -10,9 +10,9 @@ categories: ["技术介绍"]
 categoryes_weight: 96
 ---
 
-<!-- more -->
-
 此系列作为 redis 设计与实现的笔记，会将本人自认为重点部分单独拎出来，并加入本人的一些理解。
+
+<!-- more -->
 
 ### SDS
 

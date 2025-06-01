@@ -10,6 +10,8 @@ categories: ["技术介绍"]
 categoryes_weight: 96
 ---
 
+redis Server
+
 <!-- more -->
 
 ### 数据库切换

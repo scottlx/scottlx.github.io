@@ -12,6 +12,8 @@ categoryes_weight: 96
 
 <!-- more -->
 
+一种基于 DAG 处理配置依赖关系的事务机制
+
 ### 问题背景
 
 vpp 作为 vrouter，类似物理交换机，各配置项依赖关系复杂。以下为 vpp 配置 abf 策略路由的例子：

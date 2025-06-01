@@ -10,6 +10,8 @@ categories: ["技术介绍"]
 categoryes_weight: 96
 ---
 
+icmp 特殊 session
+
 <!-- more -->
 
 原生的 ipvs 仅处理三种类型的 ICMP 报文：ICMP_DEST_UNREACH、ICMP_SOURCE_QUENCH 和 ICMP_TIME_EXCEEDED

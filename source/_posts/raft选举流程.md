@@ -10,6 +10,8 @@ categories: ["技术介绍"]
 categoryes_weight: 96
 ---
 
+raft 选举流程
+
 <!-- more -->
 
 ### 图解

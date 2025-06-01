@@ -10,6 +10,8 @@ categories: ["技术介绍"]
 categoryes_weight: 96
 ---
 
+dpvs 数据流分析
+
 <!-- more -->
 
 ## dpvs ingress 流程分析
@@ -30,7 +32,7 @@ _netif_rcv_mbuf_ 这里面涉及到 vlan 的部分不做过多解析
 
 - RTE_ARP_OP_REPLY
 
-  复制 _nworks-1_ 份 mbuf，发送到其它 worker 的 arp_ring 上 ( **_to_other_worker_** ), 这份报文 fwd 到[arp 协议](#arp协议).
+  复制 _nworks-1_ 份 mbuf，发送到其它 worker 的 arp*ring 上 ( \*\*\_to_other_worker*\*\* ), 这份报文 fwd 到[arp 协议](#arp协议).
 
 - RTE_ARP_OP_REQUEST
 
@@ -71,13 +73,13 @@ _netif_rcv_mbuf_ 这里面涉及到 vlan 的部分不做过多解析
 
     - _INET_HOOK_PRE_ROUTING hook_
 
-      hook_list: _dp_vs_in_ , _dp_vs_prerouting_
+      hook*list: \_dp_vs_in* , _dp_vs_prerouting_
 
       这两个都与 synproxy 有关系，但是我们不会启用这个代理，不过需要注意的是 syncproxy 不通过时会丢包 [drop](#报文drop)
 
       - dp_vs_in
 
-        - 非 ETH_PKT_HOST(broadcast 或者 multicast 报文)或 ip 报文交给 _ipv4_rcv_fin_ 处理
+        - 非 ETH*PKT_HOST(broadcast 或者 multicast 报文)或 ip 报文交给 \_ipv4_rcv_fin* 处理
         - 非 udp, tcp, icmp, icmp6 报文交给 _ipv4_rcv_fin_ 处理
         - 分片报文, 黑名单地址报文 [drop](#报文drop)
         - 非本 core 报文， [redirect](#dpvs_redirect分析)到对应 core 上
@@ -109,7 +111,7 @@ _netif_rcv_mbuf_ 这里面涉及到 vlan 的部分不做过多解析
     - RTF_KNI 路由(下发时配置)，[to_kni](#dpvs_kni_ingress)
     - RTF_FORWARD
       - 非 ETH_PKT_HOST, multicast or broadcast [to_kni](#dpvs_kni_ingress)
-      - ETH_PKT_HOST，_ipv4_forward_
+      - ETH*PKT_HOST，\_ipv4_forward*
     - 其它类型的路由(RTF_OUTWALL)丢给内核，[to_kni](#dpvs_kni_ingress)
 
   - _ipv4_local_in_ 是发给自己的报文
@@ -124,7 +126,7 @@ _netif_rcv_mbuf_ 这里面涉及到 vlan 的部分不做过多解析
 
           gre 协议的处理，处理通过之后，复用 [eth 层](#eth层)处理
 
-        - IPPROTO_IPIP _ipip_rcv_
+        - IPPROTO*IPIP \_ipip_rcv*
 
           ipip 协议的处理，处理通过之后，复用 [eth 层](#eth层)处理
 

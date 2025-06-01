@@ -10,6 +10,8 @@ categories: ["技术介绍"]
 categoryes_weight: 96
 ---
 
+redis 多节点
+
 <!-- more -->
 
 # 主从（复制）

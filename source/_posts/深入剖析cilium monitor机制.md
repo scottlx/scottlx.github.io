@@ -10,6 +10,8 @@ categories: ["技术介绍"]
 categoryes_weight: 96
 ---
 
+以 cilium 为例探究 trace 的实现
+
 <!-- more -->
 
 ### 可调试性

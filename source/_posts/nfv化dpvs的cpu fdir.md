@@ -10,6 +10,8 @@ categories: ["技术介绍"]
 categoryes_weight: 96
 ---
 
+cpu fdir
+
 <!-- more -->
 
 ### 数据亲和性
