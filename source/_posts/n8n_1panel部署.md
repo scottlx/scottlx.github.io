@@ -2,7 +2,7 @@
 title: "n8n 1panel部署"
 date: 2025-06-05T15:14:00+08:00
 draft: false
-tags: ["CICD", 大模型", "AI"]
+tags: ["CICD", "大模型", "AI"]
 tags_weight: 66
 series: ["区块链系列"]
 series_weight: 96
