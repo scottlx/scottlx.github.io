@@ -11,6 +11,7 @@ vhost-user协商过程
 <!-- more -->
 
 qemu进程跟spdk target 通过vhost-user协议进行通信，通过共享内存，实现spdk数据直接搬移到guest中。qemu跟spdk的通知机制通过eventfd完成，由于spdk采用polling 模式，因此不需要guest driver发送io submission notification, 后端通过callfd 向guest driver发送中断请求，通知driver处理io
+
 ![Alternative Text][1749463037383]
 
 ### vhost-user协商
@@ -85,6 +86,47 @@ vhost-user 重连是qemu chardev 实现的功能，在链接过程中进行检�
  ![Alternative Text][1749463133502]
 
 过程栈信息：
+
+```c
+  tcp_chr_wait_connected ()
+  
+  vhost_user_blk_device_realize ()
+  
+  virtio_device_realize ()
+  
+  device_set_realized ()
+  
+  property_set_bool ()
+  
+  object_property_set ()
+  
+  object_property_set_qobject ()
+  
+  object_property_set_bool ()
+  
+  virtio_pci_realize ()
+  
+  pci_qdev_realize ()
+  
+  device_set_realized ()
+  
+  property_set_bool ()
+  
+  object_property_set ()
+  
+  object_property_set_qobject ()
+  
+  object_property_set_bool ()
+  
+  qdev_device_add_from_qdict ()
+  
+  qmp_x_exit_preconfig ()
+  
+  qemu_init ()
+  
+  main ()
+```
+
 
 
 ```C
