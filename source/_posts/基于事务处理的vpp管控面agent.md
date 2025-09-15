@@ -10,9 +10,9 @@ categories: ["技术介绍"]
 categoryes_weight: 96
 ---
 
-<!-- more -->
-
 一种基于 DAG 处理配置依赖关系的事务机制
+
+<!-- more -->
 
 ### 问题背景
 
